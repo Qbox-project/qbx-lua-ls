@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use lsp_types::{DocumentHighlight, DocumentHighlightKind, Location, Position, PrepareRenameResponse, TextEdit, Url, WorkspaceEdit};
+use lsp_types::{
+    DocumentHighlight, DocumentHighlightKind, Location, Position, PrepareRenameResponse, TextEdit, Url, WorkspaceEdit,
+};
 use qbx_lua_analysis::project::read_source;
 use qbx_lua_analysis::scope::{resolve, GlobalRefKind, Resolved};
 use qbx_lua_syntax::{parse, LineIndex, Span};
@@ -36,7 +38,12 @@ fn global_name_at(doc: &Document, offset: u32) -> Option<&str> {
 
 /// Every occurrence of a global across the files that can see it. Closed files are parsed on demand
 /// instead of keeping their reference lists in memory.
-fn global_occurrences(ws: &Workspace, docs: &Documents, doc: &Document, name: &str) -> Vec<(Url, lsp_types::Range, bool)> {
+fn global_occurrences(
+    ws: &Workspace,
+    docs: &Documents,
+    doc: &Document,
+    name: &str,
+) -> Vec<(Url, lsp_types::Range, bool)> {
     let mut out = Vec::new();
     for (id, entry) in ws.index.files() {
         if entry.origin == FileOrigin::Stub || !ws.index.is_related(doc.file, id) {
@@ -56,13 +63,23 @@ fn global_occurrences(ws: &Workspace, docs: &Documents, doc: &Document, name: &s
         let resolution = resolve(&parse(&source));
         let lines = LineIndex::new(&source);
         for global in resolution.globals.iter().filter(|g| g.name == name) {
-            out.push((entry.uri.clone(), span_to_range(&source, &lines, global.span), global.kind != GlobalRefKind::Read));
+            out.push((
+                entry.uri.clone(),
+                span_to_range(&source, &lines, global.span),
+                global.kind != GlobalRefKind::Read,
+            ));
         }
     }
     out
 }
 
-pub fn references(ws: &Workspace, docs: &Documents, doc: &Document, position: Position, include_declaration: bool) -> Vec<Location> {
+pub fn references(
+    ws: &Workspace,
+    docs: &Documents,
+    doc: &Document,
+    position: Position,
+    include_declaration: bool,
+) -> Vec<Location> {
     let offset = doc.offset(position);
     if let Some(occurrences) = local_occurrences(doc, offset) {
         let decl = doc.resolution.resolved_at_offset(offset).and_then(|(r, _)| match r {
@@ -87,7 +104,10 @@ pub fn highlights(doc: &Document, position: Position) -> Vec<DocumentHighlight> 
     let offset = doc.offset(position);
     let kind = |write: bool| Some(if write { DocumentHighlightKind::WRITE } else { DocumentHighlightKind::READ });
     if let Some(occurrences) = local_occurrences(doc, offset) {
-        return occurrences.into_iter().map(|o| DocumentHighlight { range: doc.range(o.span), kind: kind(o.write) }).collect();
+        return occurrences
+            .into_iter()
+            .map(|o| DocumentHighlight { range: doc.range(o.span), kind: kind(o.write) })
+            .collect();
     }
     let Some(name) = global_name_at(doc, offset) else { return Vec::new() };
     doc.resolution
@@ -106,7 +126,8 @@ pub fn prepare_rename(doc: &Document, position: Position) -> Option<PrepareRenam
     }
     if let Resolved::Global(index) = resolved {
         let name = &doc.resolution.globals[index as usize].name;
-        let is_runtime = qbx_lua_analysis::env::builtins().get(name).is_some() || qbx_fivem_data::native(name).is_some();
+        let is_runtime =
+            qbx_lua_analysis::env::builtins().get(name).is_some() || qbx_fivem_data::native(name).is_some();
         if is_runtime {
             return None;
         }
@@ -114,7 +135,13 @@ pub fn prepare_rename(doc: &Document, position: Position) -> Option<PrepareRenam
     Some(PrepareRenameResponse::Range(doc.range(span)))
 }
 
-pub fn rename(ws: &Workspace, docs: &Documents, doc: &Document, position: Position, new_name: &str) -> Option<WorkspaceEdit> {
+pub fn rename(
+    ws: &Workspace,
+    docs: &Documents,
+    doc: &Document,
+    position: Position,
+    new_name: &str,
+) -> Option<WorkspaceEdit> {
     let valid = new_name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && new_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && qbx_lua_syntax::lexer::keyword(new_name).is_none();

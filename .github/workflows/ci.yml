@@ -1,0 +1,32 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qbx-lua-ls
+      - uses: actions/checkout@v4
+        with:
+          repository: Qbox-project/qbx-lint
+          path: qbx-lint
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qbx-lua-ls
+      - run: cargo fmt --check
+        working-directory: qbx-lua-ls
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: qbx-lua-ls
+      - run: cargo test
+        working-directory: qbx-lua-ls

@@ -256,7 +256,9 @@ impl Index {
         match (source.resource, other.resource) {
             (Some(a), Some(b)) if a == b => true,
             (Some(a), _) => self.resource(a).is_some_and(|r| {
-                r.imports.iter().any(|(file, side)| *file == target && source.side.is_none_or(|s| side.is_available_on(s)))
+                r.imports
+                    .iter()
+                    .any(|(file, side)| *file == target && source.side.is_none_or(|s| side.is_available_on(s)))
             }),
             (None, None) => true,
             (None, Some(_)) => false,
@@ -308,7 +310,10 @@ impl Index {
                 (Some(a), Some(b)) => b.is_available_on(a),
                 _ => true,
             };
-            sides_match && (self.is_visible(from, target) || self.is_related(from, target) || self.imports_resource_of(from, target))
+            sides_match
+                && (self.is_visible(from, target)
+                    || self.is_related(from, target)
+                    || self.imports_resource_of(from, target))
         };
         let visible: Vec<_> = slots.iter().filter(|(f, _)| reachable(*f)).filter_map(resolve).collect();
         if !visible.is_empty() {
@@ -318,7 +323,8 @@ impl Index {
     }
 
     fn imports_resource_of(&self, from: FileId, target: FileId) -> bool {
-        let (Some(resource), Some(target_resource)) = (self.resource_of(from), self.file(target).and_then(|f| f.resource))
+        let (Some(resource), Some(target_resource)) =
+            (self.resource_of(from), self.file(target).and_then(|f| f.resource))
         else {
             return false;
         };

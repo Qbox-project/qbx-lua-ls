@@ -77,7 +77,9 @@ fn local_hover(infer: &Infer, id: LocalId) -> String {
     };
     let mut out = lua_block(&describe_value(prefix, &local.name, &ty));
     let doc = match infer.ctx.decl(local.decl.start) {
-        Some(Decl::Local { stmt, .. } | Decl::LocalFunction { stmt, .. }) => render_doc(&infer.ctx.doc_at(stmt.span.start)),
+        Some(Decl::Local { stmt, .. } | Decl::LocalFunction { stmt, .. }) => {
+            render_doc(&infer.ctx.doc_at(stmt.span.start))
+        }
         Some(Decl::Param { doc_anchor: Some(anchor), .. }) => {
             infer.ctx.doc_at(*anchor).param_description(&local.name).map(Into::into)
         }

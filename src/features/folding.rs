@@ -17,7 +17,12 @@ impl Folds<'_> {
         if end > start {
             let end_line = if kind.is_none() { end - 1 } else { end };
             if end_line > start || kind.is_some() {
-                self.out.push(FoldingRange { start_line: start, end_line: end_line.max(start), kind, ..FoldingRange::default() });
+                self.out.push(FoldingRange {
+                    start_line: start,
+                    end_line: end_line.max(start),
+                    kind,
+                    ..FoldingRange::default()
+                });
             }
         }
     }
@@ -75,7 +80,12 @@ pub fn folding_ranges(doc: &Document) -> Vec<FoldingRange> {
             Some((start, end)) if first <= end + 1 => Some((start, last.max(end))),
             Some((start, end)) => {
                 if end > start {
-                    folds.out.push(FoldingRange { start_line: start, end_line: end, kind: Some(FoldingRangeKind::Comment), ..FoldingRange::default() });
+                    folds.out.push(FoldingRange {
+                        start_line: start,
+                        end_line: end,
+                        kind: Some(FoldingRangeKind::Comment),
+                        ..FoldingRange::default()
+                    });
                 }
                 Some((first, last))
             }
@@ -83,7 +93,12 @@ pub fn folding_ranges(doc: &Document) -> Vec<FoldingRange> {
         };
     }
     if let Some((start, end)) = run.filter(|(s, e)| e > s) {
-        folds.out.push(FoldingRange { start_line: start, end_line: end, kind: Some(FoldingRangeKind::Comment), ..FoldingRange::default() });
+        folds.out.push(FoldingRange {
+            start_line: start,
+            end_line: end,
+            kind: Some(FoldingRangeKind::Comment),
+            ..FoldingRange::default()
+        });
     }
     folds.out.sort_by_key(|f| (f.start_line, f.end_line));
     folds.out.dedup_by_key(|f| f.start_line);

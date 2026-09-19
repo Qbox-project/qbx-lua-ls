@@ -367,7 +367,9 @@ impl<'a> Infer<'a> {
         let Some(decl) = self.ctx.decl(local.decl.start) else { return Type::Unknown };
         match decl {
             Decl::Local { stmt, index } => self.local_stmt_type(stmt, *index, local.func == 0),
-            Decl::LocalFunction { stmt, func } => Type::Fun(Arc::new(self.fun_type(func, Some(stmt.span.start), false))),
+            Decl::LocalFunction { stmt, func } => {
+                Type::Fun(Arc::new(self.fun_type(func, Some(stmt.span.start), false)))
+            }
             Decl::Param { func, index, doc_anchor, expected } => {
                 let name = &func.params[*index].text;
                 if let Some(anchor) = doc_anchor {
@@ -402,7 +404,8 @@ impl<'a> Infer<'a> {
             if top_level && table_fields(expr).is_some() {
                 return Type::GlobalTable(self.ctx.local_owner_key(names[index].name.span.start));
             }
-            let ty = if is_last { self.expr_multi(expr).into_iter().next().unwrap_or_default() } else { self.expr(expr) };
+            let ty =
+                if is_last { self.expr_multi(expr).into_iter().next().unwrap_or_default() } else { self.expr(expr) };
             return ty.widen();
         }
         match exprs.last() {
@@ -444,7 +447,13 @@ impl<'a> Infer<'a> {
             if let (Some("pairs" | "ipairs" | "next"), Some(arg)) = (iterator.as_deref(), args.first()) {
                 let (key, value) = self.key_value_types(&self.expr(arg));
                 let key = if iterator.as_deref() == Some("ipairs") { Type::Integer } else { key };
-                return if index == 0 { key } else if index == 1 { value } else { Type::Unknown };
+                return if index == 0 {
+                    key
+                } else if index == 1 {
+                    value
+                } else {
+                    Type::Unknown
+                };
             }
         }
         self.expr(first).as_fun().and_then(|f| f.returns.get(index).cloned()).unwrap_or_default()
@@ -463,9 +472,12 @@ impl<'a> Infer<'a> {
                 None => (Type::String, Type::Unknown),
             },
             Type::GlobalTable(_) => (Type::String, Type::Unknown),
-            Type::Union(types) => {
-                types.iter().filter(|t| !matches!(t, Type::Nil)).map(|t| self.key_value_types(t)).next().unwrap_or_default()
-            }
+            Type::Union(types) => types
+                .iter()
+                .filter(|t| !matches!(t, Type::Nil))
+                .map(|t| self.key_value_types(t))
+                .next()
+                .unwrap_or_default(),
             _ => (Type::Unknown, Type::Unknown),
         }
     }
@@ -504,7 +516,9 @@ impl<'a> Infer<'a> {
             Type::Array(inner) => *inner,
             Type::Map(_, value) => *value,
             Type::Tuple(items) => match &index.kind {
-                ExprKind::Number(NumberValue::Int(i)) => items.get((*i as usize).wrapping_sub(1)).cloned().unwrap_or_default(),
+                ExprKind::Number(NumberValue::Int(i)) => {
+                    items.get((*i as usize).wrapping_sub(1)).cloned().unwrap_or_default()
+                }
                 _ => Type::union(items),
             },
             Type::Shape(shape) => shape.index.as_ref().map(|(_, v)| v.clone()).unwrap_or_default(),
@@ -521,13 +535,17 @@ impl<'a> Infer<'a> {
         let mut positional = Vec::new();
         for field in fields.iter().take(MAX_SHAPE_FIELDS) {
             match field {
-                TableField::Named { name, value } => {
-                    shape.fields.push(ShapeField { name: name.text.clone(), ty: self.expr(value).widen(), optional: false })
-                }
+                TableField::Named { name, value } => shape.fields.push(ShapeField {
+                    name: name.text.clone(),
+                    ty: self.expr(value).widen(),
+                    optional: false,
+                }),
                 TableField::Keyed { key, value } => match &key.kind {
-                    ExprKind::String(name) => {
-                        shape.fields.push(ShapeField { name: name.clone(), ty: self.expr(value).widen(), optional: false })
-                    }
+                    ExprKind::String(name) => shape.fields.push(ShapeField {
+                        name: name.clone(),
+                        ty: self.expr(value).widen(),
+                        optional: false,
+                    }),
                     _ => shape.index = Some((self.expr(key).widen(), self.expr(value).widen())),
                 },
                 TableField::SetMember(name) => {
@@ -588,7 +606,9 @@ impl<'a> Infer<'a> {
                     return Some((fun.clone(), None));
                 }
                 match self.resolve_alias(&ty) {
-                    Type::Named(name, _) => self.index.class(&name).and_then(|(_, c)| c.call.clone()).map(|f| (f, None)),
+                    Type::Named(name, _) => {
+                        self.index.class(&name).and_then(|(_, c)| c.call.clone()).map(|f| (f, None))
+                    }
                     _ => None,
                 }
             }

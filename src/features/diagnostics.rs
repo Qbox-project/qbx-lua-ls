@@ -26,7 +26,8 @@ pub fn diagnostics(ws: &Workspace, doc: &Document, rule_overrides: &[(String, Le
     let resource = resource_id.and_then(|id| ws.index.resource(id));
 
     let found = if doc.is_manifest() {
-        let Some(resource) = resource.or_else(|| ws.index.resources.iter().find(|r| r.manifest_path == doc.path)) else {
+        let Some(resource) = resource.or_else(|| ws.index.resources.iter().find(|r| r.manifest_path == doc.path))
+        else {
             return Vec::new();
         };
         let manifest = qbx_lua_analysis::manifest::Manifest::from_chunk(&doc.chunk);
@@ -42,7 +43,9 @@ pub fn diagnostics(ws: &Workspace, doc: &Document, rule_overrides: &[(String, Le
         let summary = summarize(&doc.chunk, &doc.resolution);
         let env = resource_id.map(|id| ws.resource_env(id));
         let resource_input = match (resource, &env) {
-            (Some(resource), Some(env)) => Some(ResourceInput { name: &resource.name, env, manifest: &resource.manifest }),
+            (Some(resource), Some(env)) => {
+                Some(ResourceInput { name: &resource.name, env, manifest: &resource.manifest })
+            }
             _ => None,
         };
         check_file(&FileInput {

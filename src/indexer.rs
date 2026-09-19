@@ -46,7 +46,8 @@ pub fn index_file(file: FileId, source: &str, chunk: &Chunk, resolution: &Resolu
     let ctx = FileContext::new(file, source, chunk, resolution);
     let infer = Infer::new(&ctx, index);
     let lines = LineIndex::new(source);
-    let mut indexer = Indexer { file, source, lines: &lines, ctx: &ctx, infer: &infer, out: FileIndex::default(), depth: 0 };
+    let mut indexer =
+        Indexer { file, source, lines: &lines, ctx: &ctx, infer: &infer, out: FileIndex::default(), depth: 0 };
     indexer.doc_comments(&chunk.comments);
     indexer.block(&chunk.block);
     if let Some(Stmt { kind: StmtKind::Return(exprs), .. }) = chunk.block.stmts.last() {
@@ -183,7 +184,14 @@ impl<'a> Indexer<'a> {
     }
 
     /// The symbol for `name = value`, registering nested table fields under `nested_owner`.
-    fn value_symbol(&mut self, name: &Name, value: Option<&Expr>, doc_anchor: u32, nested_owner: &str, table_depth: u32) -> Symbol {
+    fn value_symbol(
+        &mut self,
+        name: &Name,
+        value: Option<&Expr>,
+        doc_anchor: u32,
+        nested_owner: &str,
+        table_depth: u32,
+    ) -> Symbol {
         let doc = self.ctx.doc_at(doc_anchor);
         let mut kind = SymbolKind::Variable;
         let ty = if let Some(class) = doc.classes.last() {
@@ -391,7 +399,10 @@ impl<'a> Indexer<'a> {
                             ExprKind::Name(root) => self.global_class(&root.text),
                             _ => None,
                         };
-                        match own_class.map(|class| Type::Named(class, Vec::new())).unwrap_or_else(|| self.infer.expr(base)) {
+                        match own_class
+                            .map(|class| Type::Named(class, Vec::new()))
+                            .unwrap_or_else(|| self.infer.expr(base))
+                        {
                             Type::Named(class, _) => class,
                             _ => SmolStr::new(path),
                         }
@@ -472,7 +483,9 @@ impl<'a> Indexer<'a> {
             Resolved::Local(id) => {
                 let decl = self.ctx.resolution.local(id).decl.start;
                 let anchor = match self.ctx.decl(decl)? {
-                    crate::infer::Decl::LocalFunction { stmt, .. } | crate::infer::Decl::Local { stmt, .. } => stmt.span.start,
+                    crate::infer::Decl::LocalFunction { stmt, .. } | crate::infer::Decl::Local { stmt, .. } => {
+                        stmt.span.start
+                    }
                     _ => return None,
                 };
                 render_doc(&self.ctx.doc_at(anchor))

@@ -29,11 +29,27 @@ const KEYWORDS: &[&str] = &[
 
 const SNIPPETS: &[(&str, &str, &str)] = &[
     ("CreateThread", "CreateThread(function()\n\t$0\nend)", "Start a new thread"),
-    ("thread loop", "CreateThread(function()\n\twhile true do\n\t\t$0\n\t\tWait(${1:0})\n\tend\nend)", "Thread with a loop that yields every iteration"),
-    ("RegisterNetEvent", "RegisterNetEvent('${1:resource}:${2:event}', function(${3})\n\t$0\nend)", "Register a network event with a handler"),
+    (
+        "thread loop",
+        "CreateThread(function()\n\twhile true do\n\t\t$0\n\t\tWait(${1:0})\n\tend\nend)",
+        "Thread with a loop that yields every iteration",
+    ),
+    (
+        "RegisterNetEvent",
+        "RegisterNetEvent('${1:resource}:${2:event}', function(${3})\n\t$0\nend)",
+        "Register a network event with a handler",
+    ),
     ("AddEventHandler", "AddEventHandler('${1:eventName}', function(${2})\n\t$0\nend)", "Handle a local event"),
-    ("RegisterCommand", "RegisterCommand('${1:name}', function(source, args, raw)\n\t$0\nend, ${2:false})", "Register a console/chat command"),
-    ("lib.callback.register", "lib.callback.register('${1:resource}:${2:name}', function(source${3})\n\t$0\nend)", "Register an ox_lib server callback"),
+    (
+        "RegisterCommand",
+        "RegisterCommand('${1:name}', function(source, args, raw)\n\t$0\nend, ${2:false})",
+        "Register a console/chat command",
+    ),
+    (
+        "lib.callback.register",
+        "lib.callback.register('${1:resource}:${2:name}', function(source${3})\n\t$0\nend)",
+        "Register an ox_lib server callback",
+    ),
     ("lib.callback.await", "lib.callback.await('${1:resource}:${2:name}', ${3:false}$0)", "Await an ox_lib callback"),
     ("for pairs", "for ${1:k}, ${2:v} in pairs(${3:t}) do\n\t$0\nend", "Iterate over a table"),
     ("for ipairs", "for ${1:i}, ${2:v} in ipairs(${3:t}) do\n\t$0\nend", "Iterate over an array"),
@@ -63,8 +79,19 @@ const DOC_TAGS: &[(&str, &str)] = &[
 ];
 
 const PRIMITIVE_TYPES: &[&str] = &[
-    "any", "nil", "boolean", "number", "integer", "string", "table", "function", "thread", "userdata", "unknown",
-    "fun()", "table<string, any>",
+    "any",
+    "nil",
+    "boolean",
+    "number",
+    "integer",
+    "string",
+    "table",
+    "function",
+    "thread",
+    "userdata",
+    "unknown",
+    "fun()",
+    "table<string, any>",
 ];
 
 const EVENT_NAME_CALLS: &[&str] = &[
@@ -79,7 +106,14 @@ const EVENT_NAME_CALLS: &[&str] = &[
 ];
 const CALLBACK_NAME_CALLS: &[&str] = &["lib.callback", "lib.callback.await", "lib.callback.register"];
 const REQUIRE_CALLS: &[&str] = &["require", "lib.require", "lib.load"];
-const RESOURCE_NAME_CALLS: &[&str] = &["GetResourceState", "StartResource", "StopResource", "GetResourcePath", "GetResourceMetadata", "LoadResourceFile"];
+const RESOURCE_NAME_CALLS: &[&str] = &[
+    "GetResourceState",
+    "StartResource",
+    "StopResource",
+    "GetResourcePath",
+    "GetResourceMetadata",
+    "LoadResourceFile",
+];
 
 fn kind_of(kind: SymbolKind, ty: &Type) -> CompletionItemKind {
     match kind {
@@ -104,7 +138,12 @@ fn detail_of(name: &str, ty: &Type) -> Option<String> {
 }
 
 fn item(label: &str, kind: CompletionItemKind, sort_group: u8) -> CompletionItem {
-    CompletionItem { label: label.to_string(), kind: Some(kind), sort_text: Some(format!("{sort_group}{label}")), ..CompletionItem::default() }
+    CompletionItem {
+        label: label.to_string(),
+        kind: Some(kind),
+        sort_text: Some(format!("{sort_group}{label}")),
+        ..CompletionItem::default()
+    }
 }
 
 fn member_item(member: &MemberInfo) -> CompletionItem {
@@ -122,7 +161,8 @@ fn member_item(member: &MemberInfo) -> CompletionItem {
 
 fn is_identifier(text: &str) -> bool {
     let mut chars = text.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn identifier_prefix(before: &str) -> &str {
@@ -140,11 +180,11 @@ pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<
         return is_doc.then(|| respond(doc_comment_items(ws, before), false));
     }
 
-    let in_string = doc
-        .chunk
-        .tokens
-        .iter()
-        .position(|t| matches!(t.kind, TokenKind::String | TokenKind::LongString) && t.span.start < offset && offset < t.span.end.max(t.span.start + 1));
+    let in_string = doc.chunk.tokens.iter().position(|t| {
+        matches!(t.kind, TokenKind::String | TokenKind::LongString)
+            && t.span.start < offset
+            && offset < t.span.end.max(t.span.start + 1)
+    });
     if let Some(token_index) = in_string {
         return Some(respond(string_items(ws, doc, offset, token_index), false));
     }
@@ -205,7 +245,8 @@ fn doc_comment_items(ws: &Workspace, before: &str) -> Vec<CompletionItem> {
     if !takes_type {
         return Vec::new();
     }
-    let mut items: Vec<CompletionItem> = PRIMITIVE_TYPES.iter().map(|t| item(t, CompletionItemKind::KEYWORD, 1)).collect();
+    let mut items: Vec<CompletionItem> =
+        PRIMITIVE_TYPES.iter().map(|t| item(t, CompletionItemKind::KEYWORD, 1)).collect();
     let mut seen = FxHashSet::default();
     for name in ws.index.class_names().filter(|n| seen.insert((*n).clone())) {
         items.push(item(name, CompletionItemKind::CLASS, 0));
@@ -347,9 +388,7 @@ fn member_items(infer: &Infer, doc: &Document, offset: u32, head: &str, via_colo
 
 /// Fallback for member completion when the parser could not attach the trailing `.` to an expression.
 fn type_of_path(infer: &Infer, text: &str, offset: u32) -> Type {
-    let start = text
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':')))
-        .map_or(0, |i| i + 1);
+    let start = text.rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))).map_or(0, |i| i + 1);
     let mut segments = text[start..].split(['.', ':']).filter(|s| !s.is_empty());
     let Some(root) = segments.next() else { return Type::Unknown };
     let mut ty = match infer.ctx.resolution.lookup_local_at(root, offset) {
@@ -397,7 +436,13 @@ fn expected_field_items(infer: &Infer, doc: &Document, offset: u32) -> Vec<Compl
         .collect()
 }
 
-fn scope_items(ws: &Workspace, infer: &Infer, doc: &Document, offset: u32, prefix: &str) -> (Vec<CompletionItem>, bool) {
+fn scope_items(
+    ws: &Workspace,
+    infer: &Infer,
+    doc: &Document,
+    offset: u32,
+    prefix: &str,
+) -> (Vec<CompletionItem>, bool) {
     let matches = |name: &str| name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix);
     let mut items = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();

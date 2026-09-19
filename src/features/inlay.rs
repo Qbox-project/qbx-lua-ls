@@ -34,7 +34,8 @@ impl Hints<'_, '_> {
         let Some((fun, _)) = self.infer.callee_fun(base, method) else { return };
         let (skip_params, skip_args) = fun.call_offsets(method.is_some());
         for (arg, param) in args.iter().skip(skip_args).zip(fun.params.iter().skip(skip_params)) {
-            if !is_literal(arg) || param.name == "..." || param.name.is_empty() || !self.range.contains(arg.span.start) {
+            if !is_literal(arg) || param.name == "..." || param.name.is_empty() || !self.range.contains(arg.span.start)
+            {
                 continue;
             }
             self.out.push(InlayHint {
@@ -61,7 +62,9 @@ impl<'ast> Visitor<'ast> for Hints<'_, '_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
         match &expr.kind {
             ExprKind::Call { callee, args, style: CallStyle::Paren, .. } => self.call(callee, None, args),
-            ExprKind::MethodCall { base, method, args, style: CallStyle::Paren, .. } => self.call(base, Some(method), args),
+            ExprKind::MethodCall { base, method, args, style: CallStyle::Paren, .. } => {
+                self.call(base, Some(method), args)
+            }
             _ => {}
         }
         visit::walk_expr(self, expr);

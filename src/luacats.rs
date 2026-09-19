@@ -288,7 +288,10 @@ mod tests {
         assert!(doc.is_async);
 
         let fun = doc.fun_type(&["model".into(), "coords".into()], true, false);
-        assert_eq!(fun.signature("spawn"), "function spawn(model: string|integer, coords?: vector4, ...: any): integer, string?");
+        assert_eq!(
+            fun.signature("spawn"),
+            "function spawn(model: string|integer, coords?: vector4, ...: any): integer, string?"
+        );
     }
 
     #[test]

@@ -553,7 +553,10 @@ mod tests {
         assert_eq!(roundtrip("(string|number)[]"), "(string|number)[]");
         assert_eq!(roundtrip("table<string, Player>"), "table<string, Player>");
         assert_eq!(roundtrip("table<Player>"), "Player[]");
-        assert_eq!(roundtrip("fun(a: string, b?: number): boolean, string"), "fun(a: string, b?: number): boolean, string");
+        assert_eq!(
+            roundtrip("fun(a: string, b?: number): boolean, string"),
+            "fun(a: string, b?: number): boolean, string"
+        );
         assert_eq!(roundtrip("fun(...: any)"), "fun(...: any)");
         assert_eq!(roundtrip("{ name: string, age?: number }"), "{ name: string, age?: number }");
         assert_eq!(roundtrip("{ [string]: boolean }"), "{ [string]: boolean }");

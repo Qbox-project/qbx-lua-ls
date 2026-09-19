@@ -64,9 +64,13 @@ impl Client {
     fn request(&mut self, method: &str, params: Value) -> Value {
         self.next_id += 1;
         let id = RequestId::from(self.next_id);
-        self.connection.sender.send(Message::Request(Request { id: id.clone(), method: method.into(), params })).unwrap();
+        self.connection
+            .sender
+            .send(Message::Request(Request { id: id.clone(), method: method.into(), params }))
+            .unwrap();
         loop {
-            let message = self.connection.receiver.recv_timeout(Duration::from_secs(20)).expect("server did not answer");
+            let message =
+                self.connection.receiver.recv_timeout(Duration::from_secs(20)).expect("server did not answer");
             if let Some((response_id, result)) = self.handle_incoming(message) {
                 if response_id == id {
                     return result;
@@ -122,7 +126,10 @@ impl Client {
 
     fn completion_labels(&mut self, relative: &str, line: u32, character: u32) -> Vec<String> {
         let result = self.request("textDocument/completion", self.position_params(relative, line, character));
-        result["items"].as_array().map(|items| items.iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()).unwrap_or_default()
+        result["items"]
+            .as_array()
+            .map(|items| items.iter().map(|i| i["label"].as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
     }
 
     fn hover_text(&mut self, relative: &str, line: u32, character: u32) -> String {
@@ -364,14 +371,18 @@ fn references_rename_and_symbols() {
     params["context"] = json!({ "includeDeclaration": true });
     let refs = client.request("textDocument/references", params);
     let files: Vec<&str> = refs.as_array().unwrap().iter().map(|r| r["uri"].as_str().unwrap()).collect();
-    assert!(files.iter().any(|f| f.ends_with("shared/config.lua")) && files.iter().any(|f| f.ends_with("server/main.lua")), "{files:?}");
+    assert!(
+        files.iter().any(|f| f.ends_with("shared/config.lua")) && files.iter().any(|f| f.ends_with("server/main.lua")),
+        "{files:?}"
+    );
 
     let mut params = client.position_params(CLIENT, l, c);
     params["newName"] = json!("Settings");
     let edit = client.request("textDocument/rename", params);
     assert!(edit["changes"].as_object().unwrap().len() >= 3, "{edit}");
 
-    let symbols = client.request("textDocument/documentSymbol", json!({ "textDocument": { "uri": client.uri(CLIENT) } }));
+    let symbols =
+        client.request("textDocument/documentSymbol", json!({ "textDocument": { "uri": client.uri(CLIENT) } }));
     let names: Vec<&str> = symbols.as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"garage") && names.contains(&"RegisterNetEvent 'myresource:client:notify'"), "{names:?}");
 

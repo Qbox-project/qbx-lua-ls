@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use lsp_types::{CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, Position, Range, TextEdit, WorkspaceEdit};
+use lsp_types::{
+    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, Position, Range, TextEdit,
+    WorkspaceEdit,
+};
 
 use super::diagnostics::{FixData, SOURCE};
 use crate::document::Document;

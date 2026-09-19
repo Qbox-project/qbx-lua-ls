@@ -9,7 +9,15 @@ use crate::workspace::Workspace;
 const MAX_WORKSPACE_SYMBOLS: usize = 300;
 
 #[allow(deprecated)]
-fn symbol(doc: &Document, name: String, detail: Option<String>, kind: LspKind, full: Span, selection: Span, children: Vec<DocumentSymbol>) -> DocumentSymbol {
+fn symbol(
+    doc: &Document,
+    name: String,
+    detail: Option<String>,
+    kind: LspKind,
+    full: Span,
+    selection: Span,
+    children: Vec<DocumentSymbol>,
+) -> DocumentSymbol {
     let selection = if full.contains_span(selection) { selection } else { full };
     DocumentSymbol {
         name: if name.is_empty() { "<anonymous>".into() } else { name },
@@ -52,7 +60,15 @@ fn block_symbols(doc: &Document, block: &Block, out: &mut Vec<DocumentSymbol>) {
             StmtKind::LocalFunction { name, func } => {
                 let mut children = Vec::new();
                 block_symbols(doc, &func.body, &mut children);
-                out.push(symbol(doc, name.text.to_string(), Some(params_detail(func)), LspKind::FUNCTION, stmt.span, name.span, children));
+                out.push(symbol(
+                    doc,
+                    name.text.to_string(),
+                    Some(params_detail(func)),
+                    LspKind::FUNCTION,
+                    stmt.span,
+                    name.span,
+                    children,
+                ));
             }
             StmtKind::Local { names, exprs, .. } => {
                 for (i, name) in names.iter().enumerate() {
@@ -67,7 +83,9 @@ fn block_symbols(doc: &Document, block: &Block, out: &mut Vec<DocumentSymbol>) {
                 }
             }
             StmtKind::Expr(expr) => call_symbols(doc, expr, stmt.span, out),
-            StmtKind::Do(body) | StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } => block_symbols(doc, body, out),
+            StmtKind::Do(body) | StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } => {
+                block_symbols(doc, body, out)
+            }
             StmtKind::NumericFor { body, .. } | StmtKind::GenericFor { body, .. } => block_symbols(doc, body, out),
             StmtKind::If { branches, else_block } => {
                 branches.iter().for_each(|b| block_symbols(doc, &b.block, out));
@@ -90,7 +108,13 @@ fn value_symbol(doc: &Document, name: String, selection: Span, full: Span, value
         Some(ExprKind::Table(fields)) => {
             for field in fields.iter().take(200) {
                 if let TableField::Named { name, value } = field {
-                    children.push(value_symbol(doc, name.text.to_string(), name.span, name.span.to(value.span), Some(value)));
+                    children.push(value_symbol(
+                        doc,
+                        name.text.to_string(),
+                        name.span,
+                        name.span.to(value.span),
+                        Some(value),
+                    ));
                 }
             }
             (LspKind::OBJECT, None)
@@ -109,8 +133,13 @@ fn call_symbols(doc: &Document, expr: &Expr, full: Span, out: &mut Vec<DocumentS
     let ExprKind::Call { callee, args, .. } = &expr.kind else { return };
     let Some(path) = callee.dotted_path() else { return };
     let label = match path.as_str() {
-        "RegisterNetEvent" | "AddEventHandler" | "RegisterServerEvent" | "RegisterCommand" | "RegisterNUICallback"
-        | "exports" | "lib.callback.register" => {
+        "RegisterNetEvent"
+        | "AddEventHandler"
+        | "RegisterServerEvent"
+        | "RegisterCommand"
+        | "RegisterNUICallback"
+        | "exports"
+        | "lib.callback.register" => {
             let Some(name) = args.first().and_then(|a| a.as_string()) else { return };
             format!("{path} '{name}'")
         }
@@ -160,7 +189,12 @@ pub fn workspace_symbols(ws: &Workspace, query: &str) -> Vec<SymbolInformation> 
                 _ if member.symbol.ty.as_fun().is_some() => LspKind::FUNCTION,
                 _ => LspKind::FIELD,
             };
-            push(format!("{}.{}", member.owner, member.symbol.name), kind, member.symbol.range, Some(member.owner.to_string()));
+            push(
+                format!("{}.{}", member.owner, member.symbol.name),
+                kind,
+                member.symbol.range,
+                Some(member.owner.to_string()),
+            );
         }
         for class in file.index.classes.iter().filter(|c| matches(&c.name)) {
             push(class.name.to_string(), LspKind::CLASS, class.range, None);
@@ -168,7 +202,8 @@ pub fn workspace_symbols(ws: &Workspace, query: &str) -> Vec<SymbolInformation> 
         for export in file.index.exports.iter().filter(|e| matches(&e.name)) {
             push(format!("exports:{}", export.name), LspKind::INTERFACE, export.range, None);
         }
-        for event in file.index.events.iter().filter(|e| e.kind != crate::index::EventKind::Trigger && matches(&e.name)) {
+        for event in file.index.events.iter().filter(|e| e.kind != crate::index::EventKind::Trigger && matches(&e.name))
+        {
             push(event.name.to_string(), LspKind::EVENT, event.range, None);
         }
         if out.len() >= MAX_WORKSPACE_SYMBOLS {

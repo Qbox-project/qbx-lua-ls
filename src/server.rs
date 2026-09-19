@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 
 use crate::document::Document;
 use crate::features::{
-    code_action, completion, definition, diagnostics, folding, hover, inlay, references, semantic_tokens, signature, symbols,
+    code_action, completion, definition, diagnostics, folding, hover, inlay, references, semantic_tokens, signature,
+    symbols,
 };
 use crate::index::FileOrigin;
 use crate::workspace::{uri_to_path, Workspace};
@@ -105,12 +106,14 @@ pub fn capabilities() -> ServerCapabilities {
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),
-        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
-            legend: semantic_tokens::legend(),
-            full: Some(SemanticTokensFullOptions::Bool(true)),
-            range: Some(false),
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        })),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: semantic_tokens::legend(),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(false),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            },
+        )),
         ..ServerCapabilities::default()
     }
 }
@@ -222,7 +225,8 @@ impl Server {
         for uri in &self.dirty {
             if let Some(doc) = self.docs.get_mut(uri) {
                 if !doc.is_manifest() {
-                    doc.file = self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
+                    doc.file =
+                        self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
                 }
             }
         }
@@ -292,7 +296,11 @@ impl Server {
                     }
                 }
                 self.dirty.remove(&uri);
-                self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None });
+                self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams {
+                    uri,
+                    diagnostics: Vec::new(),
+                    version: None,
+                });
             }
             notif::DidChangeWatchedFiles::METHOD => {
                 let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(params) else { return };
