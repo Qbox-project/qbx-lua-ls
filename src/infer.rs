@@ -285,6 +285,13 @@ impl<'a> Infer<'a> {
             ExprKind::Name(name) => self.name(name),
             ExprKind::Paren(inner) => self.expr(inner),
             ExprKind::Field { base, name, .. } => {
+                if let ExprKind::Name(root) = &base.kind {
+                    let is_env = matches!(root.text.as_str(), "_ENV" | "_G")
+                        && matches!(self.ctx.resolution.resolve_at(root.span.start), Some(Resolved::Global(_)));
+                    if is_env {
+                        return self.global_type(&name.text);
+                    }
+                }
                 let base_ty = self.expr(base);
                 self.member(&base_ty, &name.text).map(|m| m.ty).unwrap_or_default()
             }
@@ -316,9 +323,16 @@ impl<'a> Infer<'a> {
             return Type::Exports(None);
         }
         let symbols = self.index.globals_named(name, self.ctx.file);
-        let known = symbols.iter().map(|(_, s)| &s.ty).find(|ty| !ty.is_unknown());
+        let known = symbols
+            .iter()
+            .map(|(_, s)| &s.ty)
+            .filter(|ty| !ty.is_unknown())
+            .max_by_key(|ty| (matches!(ty, Type::GlobalTable(_) | Type::Named(..)), ty.specificity()));
         if let Some(ty) = known.filter(|ty| !(matches!(ty, Type::Table) && self.index.has_members(name))) {
-            return ty.clone();
+            // `local lib = {}` published with `_ENV.lib = lib` and then extended as `function lib.x()`
+            // elsewhere keeps its members under two owners.
+            let aliased = matches!(ty, Type::GlobalTable(owner) if owner != name) && self.index.has_members(name);
+            return if aliased { Type::union([ty.clone(), Type::GlobalTable(SmolStr::new(name))]) } else { ty.clone() };
         }
         if self.index.has_members(name) {
             return Type::GlobalTable(SmolStr::new(name));
@@ -385,7 +399,7 @@ impl<'a> Infer<'a> {
         }
         if let Some(expr) = exprs.get(index) {
             let is_last = index + 1 == exprs.len();
-            if top_level && matches!(expr.kind, ExprKind::Table(_)) {
+            if top_level && table_fields(expr).is_some() {
                 return Type::GlobalTable(self.ctx.local_owner_key(names[index].name.span.start));
             }
             let ty = if is_last { self.expr_multi(expr).into_iter().next().unwrap_or_default() } else { self.expr(expr) };
@@ -658,8 +672,8 @@ impl<'a> Infer<'a> {
     pub fn member(&self, ty: &Type, name: &str) -> Option<MemberInfo> {
         self.guarded(|| {
             let mut found = self.members_matching(ty, Some(name));
-            let best = found.iter().position(|m| !m.ty.is_unknown()).unwrap_or(0);
-            (!found.is_empty()).then(|| found.swap_remove(best))
+            let best = (0..found.len()).max_by_key(|i| (found[*i].ty.specificity(), std::cmp::Reverse(*i)))?;
+            Some(found.swap_remove(best))
         })
     }
 
@@ -742,7 +756,14 @@ impl<'a> Infer<'a> {
     fn owner_members(&self, owner: &str, filter: Option<&str>, out: &mut Vec<MemberInfo>) {
         for (file, symbol) in self.index.members_of(owner, self.ctx.file) {
             if filter.is_none_or(|f| f == symbol.name) {
-                out.push(member_from_symbol(file, symbol));
+                let mut member = member_from_symbol(file, symbol);
+                if matches!(member.ty, Type::Table | Type::Unknown) {
+                    let nested = format!("{owner}.{}", symbol.name);
+                    if self.index.has_members(&nested) {
+                        member.ty = Type::GlobalTable(SmolStr::new(nested));
+                    }
+                }
+                out.push(member);
             }
         }
         if let Some(name) = filter {
@@ -808,6 +829,17 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
         Type::Union(types) => Type::union(types.iter().map(|t| substitute(t, generics))),
         Type::Map(k, v) => Type::Map(Box::new(substitute(k, generics)), Box::new(substitute(v, generics))),
         other => other.clone(),
+    }
+}
+
+/// The constructor behind a table-valued initialiser, looking through `setmetatable({...}, mt)`.
+pub fn table_fields(expr: &Expr) -> Option<&[TableField]> {
+    match &expr.unparen().kind {
+        ExprKind::Table(fields) => Some(fields),
+        ExprKind::Call { callee, args, .. } if callee.dotted_path().as_deref() == Some("setmetatable") => {
+            args.first().and_then(table_fields)
+        }
+        _ => None,
     }
 }
 

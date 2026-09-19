@@ -8,7 +8,7 @@ use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 
 use crate::index::{AliasDef, ClassDef, EventDef, EventKind, FileId, FileIndex, Index, Member, Symbol, SymbolKind};
-use crate::infer::{FileContext, Infer};
+use crate::infer::{table_fields, FileContext, Infer};
 use crate::luacats::{parse_doc_lines, DocGroup};
 use crate::types::Type;
 
@@ -158,6 +158,10 @@ impl<'a> Indexer<'a> {
         match ty {
             Type::Named(name, _) => Some(name.clone()),
             Type::GlobalTable(owner) => Some(owner.clone()),
+            Type::Union(types) => {
+                let owners: Vec<SmolStr> = types.iter().filter_map(|t| self.owner_of(t)).collect();
+                owners.iter().find(|o| !o.starts_with('%')).or(owners.first()).cloned()
+            }
             _ => None,
         }
     }
@@ -183,7 +187,7 @@ impl<'a> Indexer<'a> {
         let doc = self.ctx.doc_at(doc_anchor);
         let mut kind = SymbolKind::Variable;
         let ty = if let Some(class) = doc.classes.last() {
-            if let Some(Expr { kind: ExprKind::Table(fields), .. }) = value {
+            if let Some(fields) = value.and_then(table_fields) {
                 self.table_members(class.name.clone(), fields, table_depth + 1);
             }
             kind = SymbolKind::Table;
@@ -192,7 +196,12 @@ impl<'a> Indexer<'a> {
             ty.clone()
         } else {
             match value.map(|v| (&v.kind, v)) {
-                Some((ExprKind::Table(fields), _)) if table_depth < MAX_TABLE_DEPTH => {
+                Some((_, expr)) if table_fields(expr).is_some_and(<[TableField]>::is_empty) => {
+                    kind = SymbolKind::Table;
+                    Type::Table
+                }
+                Some((_, expr)) if table_fields(expr).is_some() && table_depth < MAX_TABLE_DEPTH => {
+                    let fields = table_fields(expr).unwrap_or_default();
                     kind = SymbolKind::Table;
                     if let Some(enum_name) = &doc.enum_name {
                         self.enum_class(enum_name.clone(), fields, name.span);
@@ -273,7 +282,7 @@ impl<'a> Indexer<'a> {
             StmtKind::Local { names, exprs, .. } => {
                 if self.depth == 0 {
                     for (i, name) in names.iter().enumerate() {
-                        if let Some(Expr { kind: ExprKind::Table(fields), .. }) = exprs.get(i) {
+                        if let Some(fields) = exprs.get(i).and_then(table_fields) {
                             let doc = self.ctx.doc_at(stmt.span.start);
                             let owner = match doc.classes.last() {
                                 Some(class) => class.name.clone(),
@@ -416,13 +425,13 @@ impl<'a> Indexer<'a> {
 
     fn module_return(&mut self, exprs: &[Expr]) {
         let Some(first) = exprs.first() else { return };
-        self.out.module_return = Some(match &first.kind {
-            ExprKind::Table(fields) => {
+        self.out.module_return = Some(match table_fields(first) {
+            Some(fields) => {
                 let owner = SmolStr::new(format!("%mod{}", self.file));
                 self.table_members(owner.clone(), fields, 1);
                 Type::GlobalTable(owner)
             }
-            _ => self.infer.expr(first).widen(),
+            None => self.infer.expr(first).widen(),
         });
     }
 
@@ -436,6 +445,10 @@ impl<'a> Indexer<'a> {
         let doc = self.ctx.doc_at(stmt.span.start);
         let ty = match &value.kind {
             ExprKind::Function(func) => Type::Fun(Arc::new(self.infer.fun_type(func, Some(stmt.span.start), false))),
+            ExprKind::Name(global) if self.is_global(global) => {
+                let own = self.out.globals.iter().rev().find(|s| s.name == global.text).map(|s| s.ty.clone());
+                own.unwrap_or_else(|| self.infer.expr(value))
+            }
             _ => self.infer.expr(value),
         };
         let mut symbol_doc = render_doc(&doc);
@@ -466,6 +479,22 @@ impl<'a> Indexer<'a> {
             }
             Resolved::Global(_) => self.out.globals.iter().find(|s| s.name == name.text).and_then(|s| s.doc.clone()),
         }
+    }
+
+    /// ox_lib fills its cache through `cache:set('ped', ped)`, so the field names only exist as strings.
+    fn keyed_setter(&mut self, base: &Expr, method: &Name, args: &[Expr]) {
+        let is_cache = matches!(&base.kind, ExprKind::Name(name) if name.text == "cache");
+        let (true, "set", [key, value, ..]) = (is_cache, method.text.as_str(), args) else { return };
+        let (Some(field), Some(owner)) = (key.as_string(), self.owner_of(&self.infer.expr(base))) else { return };
+        let symbol = Symbol {
+            name: field.clone(),
+            kind: SymbolKind::Field,
+            ty: self.infer.expr(value).widen(),
+            doc: None,
+            deprecated: false,
+            range: self.range(key.span),
+        };
+        self.push_member(owner, symbol);
     }
 
     fn event(&mut self, path: &str, args: &[Expr]) {
@@ -499,7 +528,8 @@ impl<'a> Indexer<'a> {
                 self.expr(callee);
                 args.iter().for_each(|a| self.expr(a));
             }
-            ExprKind::MethodCall { base, args, .. } => {
+            ExprKind::MethodCall { base, method, args, .. } => {
+                self.keyed_setter(base, method, args);
                 self.expr(base);
                 args.iter().for_each(|a| self.expr(a));
             }

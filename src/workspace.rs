@@ -76,9 +76,24 @@ impl Workspace {
         }
         stats.files += self.index_dependencies();
         self.link_imports();
+        self.reindex_all();
         stats.resources = self.index.resources.len();
         stats.millis = started.elapsed().as_millis();
         stats
+    }
+
+    /// Symbol types are inferred while indexing and may refer to files that were not indexed yet
+    /// (exports, imported globals), so a second pass settles them once every file is known.
+    fn reindex_all(&mut self) {
+        let files: Vec<(PathBuf, FileOrigin)> = self
+            .index
+            .files()
+            .filter(|(_, f)| f.origin != FileOrigin::Stub)
+            .map(|(_, f)| (f.path.clone(), f.origin))
+            .collect();
+        for (path, origin) in files {
+            self.index_path(&path, origin, None);
+        }
     }
 
     /// Indexes resources that workspace manifests refer to but that live outside the workspace,

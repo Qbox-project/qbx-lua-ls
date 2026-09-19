@@ -298,8 +298,31 @@ impl Index {
         self.visible_first(self.globals.get(name), from, |f, i| f.index.globals.get(i as usize))
     }
 
+    /// Members are looked up per resource rather than per file: libraries such as ox_lib load the
+    /// files that extend their table lazily, so importing one file makes all of them reachable.
     pub fn members_of(&self, owner: &str, from: FileId) -> Vec<(FileId, &Symbol)> {
-        self.visible_first(self.members.get(owner), from, |f, i| f.index.members.get(i as usize).map(|m| &m.symbol))
+        let Some(slots) = self.members.get(owner) else { return Vec::new() };
+        let resolve = |(file, i): &Slot| Some((*file, &self.file(*file)?.index.members.get(*i as usize)?.symbol));
+        let reachable = |target: FileId| {
+            let sides_match = match (self.file(from).and_then(|f| f.side), self.file(target).and_then(|f| f.side)) {
+                (Some(a), Some(b)) => b.is_available_on(a),
+                _ => true,
+            };
+            sides_match && (self.is_visible(from, target) || self.is_related(from, target) || self.imports_resource_of(from, target))
+        };
+        let visible: Vec<_> = slots.iter().filter(|(f, _)| reachable(*f)).filter_map(resolve).collect();
+        if !visible.is_empty() {
+            return visible;
+        }
+        slots.iter().filter_map(resolve).collect()
+    }
+
+    fn imports_resource_of(&self, from: FileId, target: FileId) -> bool {
+        let (Some(resource), Some(target_resource)) = (self.resource_of(from), self.file(target).and_then(|f| f.resource))
+        else {
+            return false;
+        };
+        resource.imports.iter().any(|(file, _)| self.file(*file).and_then(|f| f.resource) == Some(target_resource))
     }
 
     pub fn has_members(&self, owner: &str) -> bool {

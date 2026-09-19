@@ -83,6 +83,19 @@ impl Type {
         }
     }
 
+    /// How much a type tells us, used to pick the best of several declarations of one name.
+    pub fn specificity(&self) -> u8 {
+        match self {
+            Type::Unknown => 0,
+            Type::Any => 1,
+            Type::Table | Type::Function | Type::Nil => 2,
+            Type::Union(types) => types.iter().map(Type::specificity).max().unwrap_or(0),
+            Type::Boolean | Type::Number | Type::Integer | Type::String | Type::Thread | Type::Userdata => 3,
+            Type::BooleanLit(_) | Type::StringLit(_) | Type::IntLit(_) => 3,
+            _ => 4,
+        }
+    }
+
     pub fn is_unknown(&self) -> bool {
         matches!(self, Type::Unknown)
     }
@@ -220,6 +233,7 @@ impl fmt::Display for Type {
                 let rest: Vec<String> = types
                     .iter()
                     .filter(|t| !matches!(t, Type::Nil))
+                    .filter(|t| !matches!(t, Type::GlobalTable(owner) if owner.starts_with('%')) || types.len() == 1)
                     .map(|t| if matches!(t, Type::Fun(_)) { format!("({t})") } else { t.to_string() })
                     .collect();
                 match (has_nil, rest.len()) {
@@ -256,6 +270,7 @@ impl fmt::Display for Type {
                 write!(f, "{{ {} }}", parts.join(", "))
             }
             Type::Variadic(inner) => write!(f, "...{inner}"),
+            Type::GlobalTable(path) if path.starts_with('%') => f.write_str("table"),
             Type::GlobalTable(path) => f.write_str(path),
             Type::Exports(None) => f.write_str("exports"),
             Type::Exports(Some(resource)) => write!(f, "exports.{resource}"),
