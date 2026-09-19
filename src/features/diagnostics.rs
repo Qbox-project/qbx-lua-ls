@@ -41,6 +41,12 @@ pub fn diagnostics(ws: &Workspace, doc: &Document, rule_overrides: &[(String, Le
         })
     } else {
         let summary = summarize(&doc.chunk, &doc.resolution);
+        let is_map = resource.is_some_and(|r| {
+            r.manifest.is_map_file(&qbx_lua_analysis::project::relative_slash_path(&r.root, &doc.path))
+        });
+        if is_map {
+            config.set(qbx_lua_analysis::rules::UNDEFINED_GLOBAL, Level::Off);
+        }
         let env = resource_id.map(|id| ws.resource_env(id));
         let resource_input = match (resource, &env) {
             (Some(resource), Some(env)) => {
