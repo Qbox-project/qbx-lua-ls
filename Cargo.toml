@@ -1,0 +1,33 @@
+[package]
+name = "qbx_lua_ls"
+description = "A low-memory language server for FiveM Lua"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Qbox-project/qbx-lua-ls"
+rust-version = "1.85"
+
+[[bin]]
+name = "qbx-lua-ls"
+path = "src/main.rs"
+
+[dependencies]
+# Switch these to git dependencies on Qbox-project/qbx-lint once that repository is published.
+qbx_lua_syntax = { path = "../qbx-lint/crates/qbx_lua_syntax" }
+qbx_lua_analysis = { path = "../qbx-lint/crates/qbx_lua_analysis", features = ["docs"] }
+qbx_fivem_data = { path = "../qbx-lint/crates/qbx_fivem_data", features = ["docs"] }
+lsp-server = "0.7"
+lsp-types = "0.95"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crossbeam-channel = "0.5"
+rustc-hash = "2"
+smol_str = "0.3"
+walkdir = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
