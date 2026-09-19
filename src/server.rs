@@ -206,18 +206,36 @@ impl Server {
                     if self.connection.handle_shutdown(&request)? {
                         return Ok(());
                     }
-                    self.flush_index();
-                    let response = self.handle_request(request);
+                    let id = request.id.clone();
+                    let response = self.isolated(|server| {
+                        server.flush_index();
+                        server.handle_request(request)
+                    });
+                    let response = response.unwrap_or_else(|| {
+                        Response::new_err(id, ErrorCode::InternalError as i32, "internal error".to_string())
+                    });
                     self.connection.sender.send(Message::Response(response))?;
                 }
-                Message::Notification(notification) => self.handle_notification(notification),
+                Message::Notification(notification) => {
+                    self.isolated(|server| server.handle_notification(notification));
+                }
                 Message::Response(_) => {}
             }
             if self.connection.receiver.is_empty() {
-                self.publish_dirty();
+                self.isolated(Self::publish_dirty);
             }
         }
         Ok(())
+    }
+
+    /// A bug in one request must not take the editor's language server down with it.
+    fn isolated<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self)));
+        if outcome.is_err() {
+            self.dirty.clear();
+            self.log("recovered from an internal error; please report it with the file that triggered it".to_string());
+        }
+        outcome.ok()
     }
 
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
