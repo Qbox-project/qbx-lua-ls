@@ -51,8 +51,9 @@ node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-
 | --- | --- |
 | Completion | locals, side-aware globals and natives, members through classes/tables/modules, `exports.resource:Fn`, event and callback names, `require` paths, expected table fields, LuaCATS tags and types, manifest directives and paths, FiveM snippets |
 | Hover | signatures, LuaCATS docs, native docs with examples and side, event handler locations |
-| Navigation | definition (incl. `require` targets, event registrations, exports), references, rename, document highlight, document and workspace symbols |
-| Editing help | signature help, inlay parameter hints, folding, semantic tokens |
+| Navigation | definition (incl. `require` targets, event registrations, exports, locale keys), references and rename for locals, globals **and fields/methods** (each candidate's owner type is resolved, so `a.name` and `b.name` are not confused), document highlight, document and workspace symbols |
+| Editing help | signature help, inlay parameter hints, folding, semantic tokens, **document formatting** through `qbx_lua_fmt` (options from `[format]` in `qbxlint.toml`, otherwise the editor's indentation) |
+| Project knowledge | `locale('…')` keys with their text from `locales/en.json`, convar names from `GetConvar*` calls and `set`/`setr`/`sets` lines in `.cfg` files, state bag keys after `.state.` and in `AddStateBagChangeHandler` |
 | Diagnostics | every `qbx-lint` rule with manifest context, for the whole workspace (closed files are linted one at a time and dropped again; a save only re-lints the affected resource), quick fixes, "disable for this line" actions |
 | Side awareness | natives and globals filtered by client/server, wrong-side errors, event name completion that follows the call direction (`TriggerServerEvent` only offers events handled on the server), `qbx/fileInfo` for editors |
 | ox_lib | `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
@@ -69,8 +70,10 @@ the function being called.
   navigation only.
 - No control-flow narrowing, no full generics (only simple `T` substitution), no operator
   metamethod lookup apart from vectors.
-- References and rename cover locals and globals, not table fields.
-- No formatter.
+- Field references are as good as the inferred owner type: a field reached through a value whose
+  type is unknown is not found, and fields declared only by a `---@field` comment are found but
+  the comment itself is not rewritten on rename.
+- Range formatting is not implemented, only whole documents.
 
 ## Configuration
 
