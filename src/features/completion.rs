@@ -148,7 +148,10 @@ fn item(label: &str, kind: CompletionItemKind, sort_group: u8) -> CompletionItem
 
 fn member_item(member: &MemberInfo) -> CompletionItem {
     let mut out = item(&member.name, kind_of(member.kind, &member.ty), 0);
-    out.detail = detail_of(&member.name, &member.ty);
+    out.detail = match (detail_of(&member.name, &member.ty), &member.literal) {
+        (Some(ty), Some(value)) => Some(format!("{ty} = {value}")),
+        (detail, _) => detail,
+    };
     out.documentation = member.doc.as_ref().map(|d| Documentation::MarkupContent(markdown(d.to_string())));
     if member.deprecated {
         out.tags = Some(vec![CompletionItemTag::DEPRECATED]);

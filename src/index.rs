@@ -32,6 +32,8 @@ pub struct Symbol {
     pub ty: Type,
     pub doc: Option<Arc<str>>,
     pub deprecated: bool,
+    /// Source text of a short literal value, shown in hovers as `name: type = value`.
+    pub literal: Option<SmolStr>,
     pub range: Range,
 }
 
@@ -289,13 +291,10 @@ impl Index {
         from: FileId,
         get: impl Fn(&'a FileEntry, u32) -> Option<&'a T>,
     ) -> Vec<(FileId, &'a T)> {
+        // Strictly what the runtime would see: a `Config` of some other resource is a different table.
         let Some(slots) = slots else { return Vec::new() };
         let resolve = |(file, i): &Slot| Some((*file, get(self.file(*file)?, *i)?));
-        let visible: Vec<_> = slots.iter().filter(|(f, _)| self.is_visible(from, *f)).filter_map(resolve).collect();
-        if !visible.is_empty() {
-            return visible;
-        }
-        slots.iter().filter_map(resolve).collect()
+        slots.iter().filter(|(f, _)| self.is_visible(from, *f)).filter_map(resolve).collect()
     }
 
     pub fn globals_named(&self, name: &str, from: FileId) -> Vec<(FileId, &Symbol)> {
@@ -317,8 +316,25 @@ impl Index {
                     || self.is_related(from, target)
                     || self.imports_resource_of(from, target))
         };
+        // `%`-owners name one specific table of one file (a local or a module return), so whoever
+        // holds a value of that type may see all of it.
+        if owner.starts_with('%') {
+            return slots.iter().filter_map(resolve).collect();
+        }
+        // A table the resource fills itself (`Config`, `Shared`) is its own; only tables that come
+        // from an imported library (`lib`, `qbx`) are completed from that library's other files.
+        let own_resource = self.file(from).and_then(|f| f.resource);
+        let is_own = |target: FileId| {
+            target == from || (own_resource.is_some() && self.file(target).and_then(|f| f.resource) == own_resource)
+        };
+        let in_scope: Vec<&Slot> = slots.iter().filter(|(f, _)| self.is_visible(from, *f)).collect();
+        if in_scope.iter().any(|(f, _)| is_own(*f)) {
+            return in_scope.into_iter().filter_map(resolve).collect();
+        }
         let visible: Vec<_> = slots.iter().filter(|(f, _)| reachable(*f)).filter_map(resolve).collect();
-        if !visible.is_empty() {
+        // Classes travel between resources through exports and events, so their members are looked
+        // up everywhere; plain tables of unrelated resources are not.
+        if !visible.is_empty() || !self.classes.contains_key(owner) {
             return visible;
         }
         slots.iter().filter_map(resolve).collect()

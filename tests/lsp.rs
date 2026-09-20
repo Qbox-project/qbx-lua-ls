@@ -566,6 +566,30 @@ fn formats_documents() {
 }
 
 #[test]
+fn table_hover_lists_only_the_fields_in_scope() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(CLIENT);
+    let (l, c) = pos(&text, "Config.SpawnDistance", 2);
+    let hover = client.hover_text(CLIENT, l, c);
+    let expected = "```lua\n(global) Config: {\n    Debug: boolean = true,\n    SpawnDistance: number = 25.0,\n    Garages: table,\n    isDebug: function,\n}\n```";
+    assert!(hover.starts_with(expected), "{hover}");
+    assert!(!hover.contains("ShopName"), "the shop resource has its own Config: {hover}");
+    assert!(hover.contains("myresource/shared/config.lua"), "{hover}");
+
+    let (l, c) = pos(&text, "Config.SpawnDistance", 10);
+    assert!(client.hover_text(CLIENT, l, c).contains("(field) Config.SpawnDistance: number = 25.0"));
+
+    let shop = client.open(SHOP_CLIENT);
+    client.change(SHOP_CLIENT, 2, &format!("{shop}print(Config)"));
+    let hover = client.hover_text(SHOP_CLIENT, shop.lines().count() as u32, 8);
+    assert!(
+        hover.contains("ShopName: string = 'General Store'") && hover.contains("OpenAtNight: boolean = false"),
+        "{hover}"
+    );
+    assert!(!hover.contains("SpawnDistance"), "{hover}");
+}
+
+#[test]
 fn escrow_encrypted_files_are_ignored() {
     let mut client = Client::start(fixture_root());
     assert_eq!(client.diagnostics_for("shop/escrowed.lua"), [], "closed escrowed files are not linted");

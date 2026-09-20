@@ -149,6 +149,7 @@ impl<'a> Indexer<'a> {
                     ty: if field.optional { field.ty.optional() } else { field.ty },
                     doc: (!field.description.is_empty()).then(|| Arc::from(field.description.as_str())),
                     deprecated: false,
+                    literal: None,
                     range: self.range(group[field.line.min(group.len() - 1)].span),
                     name: field.name,
                 })
@@ -253,8 +254,22 @@ impl<'a> Indexer<'a> {
             ty,
             doc: render_doc(&doc),
             deprecated: doc.deprecated.is_some(),
+            literal: value.and_then(|v| self.literal_text(v)),
             range: self.range(name.span),
         }
+    }
+
+    /// Short literals are kept so hovers can show `Debug: boolean = true` without the source file.
+    fn literal_text(&self, value: &Expr) -> Option<SmolStr> {
+        let is_literal = match &value.kind {
+            ExprKind::True | ExprKind::False | ExprKind::Number(_) | ExprKind::String(_) | ExprKind::JenkinsHash(_) => {
+                true
+            }
+            ExprKind::Unary { op: UnOp::Neg, expr } => matches!(expr.kind, ExprKind::Number(_)),
+            _ => false,
+        };
+        let text = value.span.text(self.source);
+        (is_literal && text.len() <= 48 && !text.contains('\n')).then(|| SmolStr::new(text))
     }
 
     fn enum_class(&mut self, name: SmolStr, fields: &[TableField], span: Span) {
@@ -375,6 +390,7 @@ impl<'a> Indexer<'a> {
             ty: fun,
             doc: render_doc(&doc),
             deprecated: doc.deprecated.is_some(),
+            literal: None,
             range: self.range(last.span),
         };
         if name.path.is_empty() && name.method.is_none() {
@@ -492,6 +508,7 @@ impl<'a> Indexer<'a> {
             ty,
             doc: symbol_doc,
             deprecated: doc.deprecated.is_some(),
+            literal: None,
             range: self.range(name_arg.span),
         });
     }
@@ -532,6 +549,7 @@ impl<'a> Indexer<'a> {
             ty: self.infer.expr(value).widen(),
             doc: None,
             deprecated: false,
+            literal: None,
             range: self.range(key.span),
         };
         self.push_member(owner, symbol);

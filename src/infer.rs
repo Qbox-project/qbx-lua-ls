@@ -208,6 +208,7 @@ pub struct MemberInfo {
     pub ty: Type,
     pub doc: Option<Arc<str>>,
     pub deprecated: bool,
+    pub literal: Option<SmolStr>,
     pub kind: SymbolKind,
     pub location: Option<(FileId, Range)>,
 }
@@ -720,6 +721,7 @@ impl<'a> Infer<'a> {
                         ty: if field.optional { field.ty.clone().optional() } else { field.ty.clone() },
                         doc: None,
                         deprecated: false,
+                        literal: None,
                         kind: SymbolKind::Field,
                         location: None,
                     });
@@ -746,6 +748,7 @@ impl<'a> Infer<'a> {
                         ty: Type::Exports(Some(resource.name.clone())),
                         doc: Some(Arc::from(format!("Exports of the `{}` resource.", resource.name))),
                         deprecated: false,
+                        literal: None,
                         kind: SymbolKind::Table,
                         location: None,
                     });
@@ -756,6 +759,7 @@ impl<'a> Infer<'a> {
                         ty: Type::Exports(Some(SmolStr::new(name))),
                         doc: None,
                         deprecated: false,
+                        literal: None,
                         kind: SymbolKind::Table,
                         location: None,
                     });
@@ -794,6 +798,7 @@ impl<'a> Infer<'a> {
                     ty: Type::GlobalTable(SmolStr::new(nested)),
                     doc: None,
                     deprecated: false,
+                    literal: None,
                     kind: SymbolKind::Table,
                     location: None,
                 });
@@ -832,6 +837,7 @@ fn member_from_symbol(file: FileId, symbol: &crate::index::Symbol) -> MemberInfo
         ty: symbol.ty.clone(),
         doc: symbol.doc.clone(),
         deprecated: symbol.deprecated,
+        literal: symbol.literal.clone(),
         kind: symbol.kind,
         location: Some((file, symbol.range)),
     }

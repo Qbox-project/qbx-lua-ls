@@ -59,11 +59,48 @@ pub fn target_at(infer: &Infer, doc: &Document, offset: u32) -> Option<Target> {
     None
 }
 
-fn describe_value(prefix: &str, name: &str, ty: &Type) -> String {
-    match ty.as_fun() {
-        Some(fun) if matches!(ty, Type::Fun(_)) => format!("{prefix}{}", fun.signature(name)),
-        _ => format!("{prefix}{name}: {ty}"),
+const MAX_OVERVIEW_FIELDS: usize = 14;
+
+/// `name: type`, a function signature, or for tables an overview of the fields that are in scope
+/// for this file, with the literal values the index remembered.
+fn describe_value(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> String {
+    if let (Some(fun), Type::Fun(_)) = (ty.as_fun(), ty) {
+        return format!("{prefix}{}", fun.signature(name));
     }
+    let bare = ty.without_nil();
+    let is_table = matches!(
+        bare,
+        Type::GlobalTable(_)
+            | Type::Named(..)
+            | Type::Shape(_)
+            | Type::Require(_)
+            | Type::Union(_)
+            | Type::Exports(Some(_))
+    );
+    let members = if is_table { infer.members(&bare) } else { Vec::new() };
+    if members.is_empty() {
+        let value = literal.map(|l| format!(" = {l}")).unwrap_or_default();
+        return format!("{prefix}{name}: {ty}{value}");
+    }
+    let label = match &bare {
+        Type::Named(class, _) => format!("{class} "),
+        _ => String::new(),
+    };
+    let mut out = format!("{prefix}{name}: {label}{{");
+    for member in members.iter().take(MAX_OVERVIEW_FIELDS) {
+        let ty = match &member.ty {
+            Type::Fun(_) => "function".to_string(),
+            Type::GlobalTable(_) | Type::Shape(_) => "table".to_string(),
+            other => other.to_string(),
+        };
+        let value = member.literal.as_ref().map(|l| format!(" = {l}")).unwrap_or_default();
+        out.push_str(&format!("\n    {}: {ty}{value},", member.name));
+    }
+    if members.len() > MAX_OVERVIEW_FIELDS {
+        out.push_str(&format!("\n    ...(+{})", members.len() - MAX_OVERVIEW_FIELDS));
+    }
+    out.push_str("\n}");
+    out
 }
 
 fn local_hover(infer: &Infer, id: LocalId) -> String {
@@ -75,7 +112,7 @@ fn local_hover(infer: &Infer, id: LocalId) -> String {
         LocalKind::LoopVar => "(loop variable) ",
         LocalKind::Local | LocalKind::LocalFunction => "local ",
     };
-    let mut out = lua_block(&describe_value(prefix, &local.name, &ty));
+    let mut out = lua_block(&describe_value(infer, prefix, &local.name, &ty, None));
     let doc = match infer.ctx.decl(local.decl.start) {
         Some(Decl::Local { stmt, .. } | Decl::LocalFunction { stmt, .. }) => {
             render_doc(&infer.ctx.doc_at(stmt.span.start))
@@ -119,10 +156,14 @@ fn global_hover(ws: &Workspace, infer: &Infer, name: &str) -> Option<String> {
             return Some(hover);
         }
         let ty = infer.global_type(name);
-        return (!ty.is_unknown()).then(|| lua_block(&describe_value("", name, &ty)));
+        return (!ty.is_unknown()).then(|| lua_block(&describe_value(infer, "(global) ", name, &ty, None)));
     };
-    let ty = if symbol.ty.is_unknown() { infer.global_type(name) } else { symbol.ty.clone() };
-    let mut out = lua_block(&describe_value("", name, &ty));
+    // Going through `global_type` merges the table with members other files of the resource add.
+    let ty = match infer.global_type(name) {
+        Type::Unknown => symbol.ty.clone(),
+        resolved => resolved,
+    };
+    let mut out = lua_block(&describe_value(infer, "(global) ", name, &ty, symbol.literal.as_deref()));
     if let Some(doc) = &symbol.doc {
         out.push_str("\n\n");
         out.push_str(doc);
@@ -142,7 +183,7 @@ fn global_hover(ws: &Workspace, infer: &Infer, name: &str) -> Option<String> {
     Some(out)
 }
 
-pub fn member_hover(info: &MemberInfo, owner: &Type) -> String {
+pub fn member_hover(infer: &Infer, info: &MemberInfo, owner: &Type) -> String {
     let owner_label = match owner {
         Type::GlobalTable(path) if path.starts_with('%') => String::new(),
         other => other.without_nil().to_string(),
@@ -154,7 +195,7 @@ pub fn member_hover(info: &MemberInfo, owner: &Type) -> String {
         (false, false) => format!("{owner_label}.{}", info.name),
     };
     let prefix = if matches!(info.kind, SymbolKind::Field) && info.ty.as_fun().is_none() { "(field) " } else { "" };
-    let mut out = lua_block(&describe_value(prefix, &qualified, &info.ty));
+    let mut out = lua_block(&describe_value(infer, prefix, &qualified, &info.ty, info.literal.as_deref()));
     if info.deprecated {
         out.push_str("\n\n**Deprecated**");
     }
@@ -203,7 +244,7 @@ pub fn hover(ws: &Workspace, doc: &Document, position: Position) -> Option<Hover
         let text = match &target {
             Target::Local(id, _) => Some(local_hover(infer, *id)),
             Target::Global(name, _) => global_hover(ws, infer, name),
-            Target::Member { info, owner, .. } => Some(member_hover(info, owner)),
+            Target::Member { info, owner, .. } => Some(member_hover(infer, info, owner)),
         };
         text.map(|t| (t, target.span()))
     })?;

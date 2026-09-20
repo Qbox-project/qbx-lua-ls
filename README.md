@@ -50,7 +50,8 @@ node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-
 | | |
 | --- | --- |
 | Completion | locals, side-aware globals and natives, members through classes/tables/modules, `exports.resource:Fn`, event and callback names, `require` paths, expected table fields, LuaCATS tags and types, manifest directives and paths, FiveM snippets |
-| Hover | signatures, LuaCATS docs, native docs with examples and side, event handler locations |
+| Hover | signatures, LuaCATS docs, native docs with examples and side, event handler locations, and for tables an overview of their fields with types and literal values (`Debug: boolean = true`) |
+| Scoping | a global table only shows what the current file can really see: `Config` means the `Config` of this resource (plus files its manifest imports), never the merged `Config` of every resource in the workspace; library tables such as `lib` are completed from the imported library |
 | Navigation | definition (incl. `require` targets, event registrations, exports, locale keys), references and rename for locals, globals **and fields/methods** (each candidate's owner type is resolved, so `a.name` and `b.name` are not confused), document highlight, document and workspace symbols |
 | Editing help | signature help, inlay parameter hints, folding, semantic tokens, **document formatting** through `qbx_lua_fmt` (options from `[format]` in `qbxlint.toml`, otherwise the editor's indentation) |
 | Project knowledge | `locale('…')` keys with their text from `locales/en.json`, convar names from `GetConvar*` calls and `set`/`setr`/`sets` lines in `.cfg` files, state bag keys after `.state.` and in `AddStateBagChangeHandler` |
