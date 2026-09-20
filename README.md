@@ -53,7 +53,9 @@ node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-
 | Hover | signatures, LuaCATS docs, native docs with examples and side, event handler locations |
 | Navigation | definition (incl. `require` targets, event registrations, exports), references, rename, document highlight, document and workspace symbols |
 | Editing help | signature help, inlay parameter hints, folding, semantic tokens |
-| Diagnostics | every `qbx-lint` rule with manifest context, quick fixes, "disable for this line" actions |
+| Diagnostics | every `qbx-lint` rule with manifest context, for the whole workspace (closed files are linted one at a time and dropped again; a save only re-lints the affected resource), quick fixes, "disable for this line" actions |
+| Side awareness | natives and globals filtered by client/server, wrong-side errors, event name completion that follows the call direction (`TriggerServerEvent` only offers events handled on the server), `qbx/fileInfo` for editors |
+| ox_lib | `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
 
 Type sources: `---@class/@field/@alias/@enum/@type/@param/@return/@generic/@overload`, table
 constructors (also behind `setmetatable`), `function Table.name()` / `Table.name = ...` anywhere
@@ -86,7 +88,10 @@ Sent as `initializationOptions` and through `workspace/didChangeConfiguration` u
 A `qbxlint.toml` in the workspace root is honoured for diagnostics, so the editor shows what CI
 will report.
 
-Custom requests: `qbx/status` (index statistics) and `qbx/reindex`.
+`diagnostics.workspace` (default `true`) controls whether files that are not open are reported.
+
+Custom requests: `qbx/status` (index statistics), `qbx/reindex` and `qbx/fileInfo`
+(`{ uri }` → `{ side: client|server|shared|module|manifest|standalone, resource }`).
 
 ## Editors
 

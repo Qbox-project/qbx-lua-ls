@@ -438,3 +438,37 @@ fn survives_garbage_input_while_typing() {
         client.request("textDocument/signatureHelp", client.position_params(CLIENT, line, col));
     }
 }
+
+#[test]
+fn reports_problems_for_files_that_are_not_open() {
+    let mut client = Client::start(fixture_root());
+    let found = client.diagnostics_for(SERVER);
+    assert_eq!(found, [("fivem/import-not-declared".to_string(), 8)], "{found:?}");
+    assert_eq!(client.diagnostics_for(CLIENT), []);
+}
+
+#[test]
+fn event_completion_follows_the_call_direction() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(CLIENT);
+    let line = text.lines().count() as u32;
+
+    client.change(CLIENT, 2, &format!("{text}TriggerServerEvent('')"));
+    let labels = client.completion_labels(CLIENT, line, 20);
+    assert_eq!(labels, ["myresource:server:ping"], "client code can only reach server handlers");
+
+    client.change(CLIENT, 3, &format!("{text}TriggerEvent('')"));
+    let labels = client.completion_labels(CLIENT, line, 14);
+    assert_eq!(labels, ["myresource:client:notify"]);
+}
+
+#[test]
+fn reports_the_side_of_a_file() {
+    let mut client = Client::start(fixture_root());
+    let info = client.request("qbx/fileInfo", json!({ "uri": client.uri(CLIENT) }));
+    assert_eq!(info, json!({ "side": "client", "resource": "myresource" }));
+    let info = client.request("qbx/fileInfo", json!({ "uri": client.uri("myresource/shared/config.lua") }));
+    assert_eq!(info["side"], "shared");
+    let info = client.request("qbx/fileInfo", json!({ "uri": client.uri("[core]/mylib/modules/settings.lua") }));
+    assert_eq!(info["side"], "module");
+}

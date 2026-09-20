@@ -181,9 +181,11 @@ pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<
     }
 
     let in_string = doc.chunk.tokens.iter().position(|t| {
-        matches!(t.kind, TokenKind::String | TokenKind::LongString)
+        let text = t.span.text(&doc.text);
+        let unterminated = text.len() < 2 || text.as_bytes()[0] != text.as_bytes()[text.len() - 1];
+        matches!(t.kind, TokenKind::String)
             && t.span.start < offset
-            && offset < t.span.end.max(t.span.start + 1)
+            && (offset < t.span.end || (unterminated && offset == t.span.end))
     });
     if let Some(token_index) = in_string {
         return Some(respond(string_items(ws, doc, offset, token_index), false));
@@ -277,24 +279,52 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
 
     if arg_index == 0 && (EVENT_NAME_CALLS.contains(&path) || CALLBACK_NAME_CALLS.contains(&path)) {
         let wants_callbacks = CALLBACK_NAME_CALLS.contains(&path);
-        let mut seen = FxHashSet::default();
-        return ws
-            .index
-            .events()
-            .filter(|(_, e)| (e.kind == EventKind::Callback) == wants_callbacks || e.kind == EventKind::Trigger)
-            .filter(|(_, e)| seen.insert(e.name.clone()))
-            .map(|(file, event)| {
-                let mut out = item(&event.name, CompletionItemKind::EVENT, 0);
-                let origin = ws.index.file(file).and_then(|f| f.resource).and_then(|r| ws.index.resource(r));
-                out.detail = match (&event.handler, origin) {
-                    (Some(handler), Some(resource)) => Some(format!("{} · {}", resource.name, handler.signature(""))),
-                    (None, Some(resource)) => Some(resource.name.to_string()),
-                    (Some(handler), None) => Some(handler.signature("")),
-                    (None, None) => None,
-                };
-                out
-            })
-            .collect();
+        let own_side = ws.index.file(doc.file).and_then(|f| f.side);
+        // Where the handler has to live for this call to reach it.
+        let target_side = match path {
+            "TriggerServerEvent" | "TriggerLatentServerEvent" => Some(Side::Server),
+            "TriggerClientEvent" | "TriggerLatentClientEvent" => Some(Side::Client),
+            "TriggerEvent" => own_side,
+            "lib.callback" | "lib.callback.await" => match own_side {
+                Some(Side::Client) => Some(Side::Server),
+                Some(Side::Server) => Some(Side::Client),
+                _ => None,
+            },
+            _ => None,
+        };
+        let handled_on_target = |file| {
+            let side = ws.index.file(file).and_then(|f| f.side);
+            !matches!((target_side, side), (Some(target), Some(side)) if !side.is_available_on(target))
+        };
+        let candidates = |strict: bool| {
+            let mut seen = FxHashSet::default();
+            ws.index
+                .events()
+                .filter(|(_, e)| (e.kind == EventKind::Callback) == wants_callbacks || e.kind == EventKind::Trigger)
+                .filter(|(file, e)| !strict || (e.kind != EventKind::Trigger && handled_on_target(*file)))
+                .filter(|(_, e)| seen.insert(e.name.clone()))
+                .map(|(file, event)| {
+                    let mut out = item(&event.name, CompletionItemKind::EVENT, 0);
+                    let entry = ws.index.file(file);
+                    let origin = entry.and_then(|f| f.resource).and_then(|r| ws.index.resource(r));
+                    let side = entry.and_then(|f| f.side).map_or(String::new(), |s| format!(" ({})", s.label()));
+                    out.detail = match (&event.handler, origin) {
+                        (Some(handler), Some(resource)) => {
+                            Some(format!("{}{side} · {}", resource.name, handler.signature("")))
+                        }
+                        (None, Some(resource)) => Some(format!("{}{side}", resource.name)),
+                        (Some(handler), None) => Some(handler.signature("")),
+                        (None, None) => None,
+                    };
+                    out
+                })
+                .collect::<Vec<_>>()
+        };
+        let strict = if target_side.is_some() { candidates(true) } else { Vec::new() };
+        return if strict.is_empty() { candidates(false) } else { strict };
+    }
+    if arg_index == 0 && matches!(path, "lib.onCache") {
+        return cache_key_items(ws, doc);
     }
     if arg_index == 0 && REQUIRE_CALLS.contains(&path) {
         return module_items(ws, doc);
@@ -303,6 +333,40 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
         return resource_items(ws);
     }
     Vec::new()
+}
+
+/// The value fields of ox_lib's `cache` as seen from this file, read from the indexed ox_lib source.
+fn cache_keys(infer: &Infer) -> Vec<MemberInfo> {
+    let mut keys: Vec<MemberInfo> =
+        infer.members(&infer.global_type("cache")).into_iter().filter(|m| m.ty.as_fun().is_none()).collect();
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+    keys
+}
+
+fn cache_key_items(ws: &Workspace, doc: &Document) -> Vec<CompletionItem> {
+    with_infer(ws, doc, |infer| {
+        cache_keys(infer)
+            .iter()
+            .map(|key| {
+                let mut out = item(&key.name, CompletionItemKind::ENUM_MEMBER, 0);
+                out.detail = detail_of(&key.name, &key.ty).map(|ty| format!("cache.{}: {ty}", key.name));
+                out
+            })
+            .collect()
+    })
+}
+
+fn on_cache_snippet(infer: &Infer) -> Option<CompletionItem> {
+    let keys: Vec<String> = cache_keys(infer).iter().map(|k| k.name.to_string()).collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let mut out = item("onCache", CompletionItemKind::SNIPPET, 4);
+    out.insert_text =
+        Some(format!("lib.onCache('${{1|{}|}}', function(${{2:value}}, ${{3:oldValue}})\n\t$0\nend)", keys.join(",")));
+    out.insert_text_format = Some(InsertTextFormat::SNIPPET);
+    out.detail = Some(format!("React to an ox_lib cache change ({})", keys.join(", ")));
+    Some(out)
 }
 
 fn resource_items(ws: &Workspace) -> Vec<CompletionItem> {
@@ -488,6 +552,9 @@ fn scope_items(
         out.detail = Some(description.to_string());
         out.filter_text = Some(label.to_string());
         items.push(out);
+    }
+    if matches("onCache") {
+        items.extend(on_cache_snippet(infer));
     }
 
     let mut incomplete = false;

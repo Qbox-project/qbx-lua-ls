@@ -27,6 +27,7 @@ type AnyResult<T> = Result<T, Box<dyn Error + Sync + Send>>;
 #[serde(rename_all = "camelCase", default)]
 pub struct DiagnosticSettings {
     pub enable: Option<bool>,
+    pub workspace: Option<bool>,
     pub rules: FxHashMap<String, String>,
 }
 
@@ -72,6 +73,11 @@ pub struct Server {
     docs: Documents,
     settings: Settings,
     dirty: FxHashSet<Url>,
+    /// Closed files that currently have diagnostics published, so they can be cleared again.
+    workspace_reported: FxHashSet<Url>,
+    workspace_stale: bool,
+    /// Resources to re-lint after a save or close, which is much cheaper than the whole workspace.
+    stale_resources: FxHashSet<Option<crate::index::ResourceId>>,
     next_request_id: i32,
 }
 
@@ -156,7 +162,17 @@ impl Server {
         let mut ws = Workspace::default();
         ws.roots = workspace_roots(&params);
         ws.library = settings.library.iter().map(PathBuf::from).collect();
-        Self { connection, ws, docs: Documents::default(), settings, dirty: FxHashSet::default(), next_request_id: 0 }
+        Self {
+            connection,
+            ws,
+            docs: Documents::default(),
+            settings,
+            dirty: FxHashSet::default(),
+            workspace_reported: FxHashSet::default(),
+            workspace_stale: true,
+            stale_resources: FxHashSet::default(),
+            next_request_id: 0,
+        }
     }
 
     fn start(&mut self) {
@@ -223,6 +239,7 @@ impl Server {
             }
             if self.connection.receiver.is_empty() {
                 self.isolated(Self::publish_dirty);
+                self.isolated(Self::publish_workspace);
             }
         }
         Ok(())
@@ -260,6 +277,76 @@ impl Server {
         for uri in uris {
             self.publish(&uri);
         }
+    }
+
+    /// Lints the files nobody has open, so the Problems panel covers the whole workspace. Each file
+    /// is parsed, checked and dropped again; only the diagnostics leave this function.
+    fn publish_workspace(&mut self) {
+        let everything = std::mem::take(&mut self.workspace_stale);
+        let scope = std::mem::take(&mut self.stale_resources);
+        if !everything && scope.is_empty() {
+            return;
+        }
+        let in_scope = |resource: Option<crate::index::ResourceId>| everything || scope.contains(&resource);
+        let settings = &self.settings.diagnostics;
+        let enabled = settings.enable.unwrap_or(true) && settings.workspace.unwrap_or(true);
+        let mut targets: Vec<(Url, PathBuf, Option<crate::index::FileId>)> = Vec::new();
+        if enabled {
+            let in_workspace = |path: &std::path::Path| self.ws.roots.iter().any(|root| path.starts_with(root));
+            let files =
+                self.ws.index.files().filter(|(_, f)| f.origin == FileOrigin::Workspace && in_scope(f.resource));
+            for (id, file) in files {
+                targets.push((file.uri.clone(), file.path.clone(), Some(id)));
+            }
+            for (id, resource) in self.ws.index.resources.iter().enumerate() {
+                if in_workspace(&resource.manifest_path) && in_scope(Some(id as crate::index::ResourceId)) {
+                    let uri = crate::workspace::path_to_uri(&resource.manifest_path);
+                    targets.push((uri, resource.manifest_path.clone(), None));
+                }
+            }
+        }
+
+        let overrides = self.settings.rule_overrides();
+        let checked: FxHashSet<Url> = targets.iter().map(|(uri, ..)| uri.clone()).collect();
+        let mut reported: FxHashSet<Url> = if everything {
+            FxHashSet::default()
+        } else {
+            self.workspace_reported.iter().filter(|uri| !checked.contains(*uri)).cloned().collect()
+        };
+        for (uri, path, file) in targets {
+            if self.docs.contains_key(&uri) {
+                continue;
+            }
+            let Ok(text) = qbx_lua_analysis::project::read_source(&path) else { continue };
+            let mut doc = Document::new(uri.clone(), path, 0, text);
+            doc.file = file.unwrap_or_else(|| self.ws.index.allocate(&doc.path));
+            let mut found = diagnostics::diagnostics(&self.ws, &doc, &overrides);
+            found.retain(|d| d.severity != Some(DiagnosticSeverity::HINT));
+            if !found.is_empty() {
+                reported.insert(uri.clone());
+            }
+            if !found.is_empty() || self.workspace_reported.contains(&uri) {
+                self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams {
+                    uri,
+                    diagnostics: found,
+                    version: None,
+                });
+            }
+        }
+        for uri in self.workspace_reported.difference(&reported).filter(|uri| !self.docs.contains_key(*uri)) {
+            let cleared = PublishDiagnosticsParams { uri: uri.clone(), diagnostics: Vec::new(), version: None };
+            self.notify::<notif::PublishDiagnostics>(cleared);
+        }
+        self.workspace_reported = reported;
+    }
+
+    fn mark_resource_stale(&mut self, uri: &Url) {
+        let Some(path) = uri_to_path(uri) else { return };
+        let resource = match self.ws.index.file_id(&path).and_then(|id| self.ws.index.file(id)) {
+            Some(file) => file.resource,
+            None => self.ws.index.resources.iter().position(|r| r.manifest_path == path).map(|id| id as u32),
+        };
+        self.stale_resources.insert(resource);
     }
 
     fn publish(&self, uri: &Url) {
@@ -303,6 +390,7 @@ impl Server {
                 if let Some(path) = uri_to_path(&uri).filter(|p| is_manifest_file(p)) {
                     self.ws.reload_manifest(&path);
                 }
+                self.mark_resource_stale(&uri);
                 self.dirty.insert(uri);
             }
             notif::DidCloseTextDocument::METHOD => {
@@ -314,11 +402,8 @@ impl Server {
                     }
                 }
                 self.dirty.remove(&uri);
-                self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams {
-                    uri,
-                    diagnostics: Vec::new(),
-                    version: None,
-                });
+                self.mark_resource_stale(&uri);
+                self.workspace_reported.insert(uri);
             }
             notif::DidChangeWatchedFiles::METHOD => {
                 let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(params) else { return };
@@ -329,6 +414,7 @@ impl Server {
                 let section = params.settings.get("qbxLua").cloned().unwrap_or(params.settings);
                 if let Ok(settings) = serde_json::from_value::<Settings>(section) {
                     self.settings = settings;
+                    self.workspace_stale = true;
                     self.dirty.extend(self.docs.keys().cloned());
                 }
             }
@@ -356,6 +442,7 @@ impl Server {
         if manifests_changed {
             self.ws.link_imports();
         }
+        self.workspace_stale = true;
         self.dirty.extend(self.docs.keys().cloned());
     }
 
@@ -466,7 +553,21 @@ impl Server {
             "qbx/reindex" => {
                 let stats = self.ws.scan();
                 self.dirty.extend(self.docs.keys().cloned());
+                self.workspace_stale = true;
                 Ok(json!({ "files": stats.files, "resources": stats.resources, "millis": stats.millis as u64 }))
+            }
+            "qbx/fileInfo" => {
+                let p: TextDocumentIdentifier = params(raw)?;
+                let path = uri_to_path(&p.uri).ok_or("not a file uri")?;
+                let entry = self.ws.index.file_id(&path).and_then(|id| self.ws.index.file(id));
+                let resource = entry.and_then(|f| f.resource).and_then(|id| self.ws.index.resource(id));
+                let side = match (entry.and_then(|f| f.side), resource, is_manifest_file(&path)) {
+                    (_, _, true) => "manifest",
+                    (Some(side), _, _) => side.label(),
+                    (None, Some(_), _) => "module",
+                    (None, None, _) => "standalone",
+                };
+                Ok(json!({ "side": side, "resource": resource.map(|r| r.name.to_string()) }))
             }
             other => Err(format!("unsupported request: {other}")),
         }
