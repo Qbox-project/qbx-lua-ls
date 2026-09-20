@@ -22,6 +22,10 @@ pub fn diagnostics(
     rule_overrides: &[(String, Level)],
     crossrefs: &qbx_lua_analysis::crossref::CrossRefs,
 ) -> Vec<Diagnostic> {
+    // Escrow-encrypted and binary files can still be opened in the editor; they are not Lua.
+    if qbx_lua_analysis::project::is_not_source(doc.text.as_bytes()) {
+        return Vec::new();
+    }
     let mut config = ws.lint_config.for_file(&doc.path);
     for (code, level) in rule_overrides {
         config.set(code, *level);

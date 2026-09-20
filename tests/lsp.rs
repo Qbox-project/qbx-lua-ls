@@ -564,3 +564,16 @@ fn formats_documents() {
     let params = json!({ "textDocument": { "uri": client.uri(SHOP_CLIENT) }, "options": { "tabSize": 4, "insertSpaces": true } });
     assert_eq!(client.request("textDocument/formatting", params), json!([]));
 }
+
+#[test]
+fn escrow_encrypted_files_are_ignored() {
+    let mut client = Client::start(fixture_root());
+    assert_eq!(client.diagnostics_for("shop/escrowed.lua"), [], "closed escrowed files are not linted");
+
+    client.open_with("shop/escrowed.lua", "FXAP\u{1}\u{fffd}\u{fffd}garbage(((");
+    assert_eq!(client.diagnostics_for("shop/escrowed.lua"), [], "nor are they when opened in the editor");
+
+    client.open_with(SHOP_CLIENT, &"local = = =\n".repeat(200));
+    let found = client.diagnostics_for(SHOP_CLIENT);
+    assert_eq!(found.len(), 11, "syntax errors are capped at ten plus a summary: {found:?}");
+}

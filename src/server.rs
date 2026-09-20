@@ -21,6 +21,9 @@ use crate::workspace::{uri_to_path, Workspace};
 
 pub type Documents = FxHashMap<Url, Document>;
 
+/// Opening the file shows everything; the workspace overview only needs to say "look here".
+const MAX_PROBLEMS_PER_CLOSED_FILE: usize = 100;
+
 type AnyResult<T> = Result<T, Box<dyn Error + Sync + Send>>;
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -260,7 +263,8 @@ impl Server {
     fn flush_index(&mut self) {
         for uri in &self.dirty {
             if let Some(doc) = self.docs.get_mut(uri) {
-                if !doc.is_manifest() {
+                let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
+                if !doc.is_manifest() && is_source {
                     doc.file =
                         self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
                 }
@@ -334,6 +338,8 @@ impl Server {
             }
             let mut found = diagnostics::diagnostics(&self.ws, &doc, &overrides, &crossrefs);
             found.retain(|d| d.severity != Some(DiagnosticSeverity::HINT));
+            found.sort_by_key(|d| d.severity.map_or(4, |s| if s == DiagnosticSeverity::ERROR { 0 } else { 1 }));
+            found.truncate(MAX_PROBLEMS_PER_CLOSED_FILE);
             if !found.is_empty() {
                 reported.insert(uri.clone());
             }

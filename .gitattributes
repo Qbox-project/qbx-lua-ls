@@ -1,1 +1,3 @@
 * text=auto eol=lf
+*.lua text eol=lf
+**/escrowed.lua binary
