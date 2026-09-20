@@ -1,0 +1,7 @@
+{
+    "buy": {
+        "success": "You bought %s",
+        "failed": "Purchase failed"
+    },
+    "never_used": "Nobody reads this"
+}

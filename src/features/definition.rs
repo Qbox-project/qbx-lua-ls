@@ -24,6 +24,20 @@ fn string_definition(ws: &Workspace, doc: &Document, offset: u32) -> Vec<Locatio
         ExprKind::Call { callee, .. } => callee.dotted_path(),
         _ => None,
     });
+    if callee.as_deref() == Some("locale") {
+        let locale = ws.index.resource_of(doc.file).and_then(|r| qbx_lua_analysis::locale::LocaleFile::load(&r.root));
+        let Some(locale) = locale else { return Vec::new() };
+        let lines = qbx_lua_syntax::LineIndex::new(&locale.source);
+        return locale
+            .keys
+            .iter()
+            .filter(|(key, ..)| key == value.as_str())
+            .map(|(_, span, _)| {
+                let range = crate::indexer::span_to_range(&locale.source, &lines, *span);
+                Location::new(crate::workspace::path_to_uri(&locale.path), range)
+            })
+            .collect();
+    }
     if callee.as_deref().is_some_and(|path| REQUIRE_CALLS.contains(&path)) {
         return ws
             .index

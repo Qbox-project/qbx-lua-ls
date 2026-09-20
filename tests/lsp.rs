@@ -166,7 +166,7 @@ const SERVER: &str = "myresource/server/main.lua";
 fn indexes_the_workspace_and_reports_status() {
     let mut client = Client::start(fixture_root());
     let status = client.request("qbx/status", Value::Null);
-    assert_eq!(status["resources"], 2);
+    assert_eq!(status["resources"], 3);
     assert!(status["files"].as_u64().unwrap() >= 10, "{status}");
 }
 
@@ -256,7 +256,7 @@ fn completes_members_globals_natives_and_events() {
     assert!(client.completion_labels(CLIENT, l, c).contains(&"format".to_string()));
 
     let (l, c) = with_line(&mut client, "exports.", 6);
-    assert_eq!(client.completion_labels(CLIENT, l, c), ["mylib", "myresource"]);
+    assert_eq!(client.completion_labels(CLIENT, l, c), ["mylib", "myresource", "shop"]);
 
     let (l, c) = with_line(&mut client, "exports.mylib:", 7);
     let labels = client.completion_labels(CLIENT, l, c);
@@ -455,11 +455,11 @@ fn event_completion_follows_the_call_direction() {
 
     client.change(CLIENT, 2, &format!("{text}TriggerServerEvent('')"));
     let labels = client.completion_labels(CLIENT, line, 20);
-    assert_eq!(labels, ["myresource:server:ping"], "client code can only reach server handlers");
+    assert_eq!(labels, ["myresource:server:ping", "shop:buy", "shop:refund"], "only server handlers are reachable");
 
     client.change(CLIENT, 3, &format!("{text}TriggerEvent('')"));
     let labels = client.completion_labels(CLIENT, line, 14);
-    assert_eq!(labels, ["myresource:client:notify"]);
+    assert_eq!(labels, ["myresource:client:notify", "shop:bought"]);
 }
 
 #[test]
@@ -471,4 +471,96 @@ fn reports_the_side_of_a_file() {
     assert_eq!(info["side"], "shared");
     let info = client.request("qbx/fileInfo", json!({ "uri": client.uri("[core]/mylib/modules/settings.lua") }));
     assert_eq!(info["side"], "module");
+}
+
+const SHOP_CLIENT: &str = "shop/client.lua";
+const SHOP_SERVER: &str = "shop/server.lua";
+
+#[test]
+fn cross_file_rules_run_in_the_editor() {
+    let mut client = Client::start(fixture_root());
+    let found = client.diagnostics_for(SHOP_CLIENT);
+    let expected = [
+        ("qbox/unknown-locale-key", 4),
+        ("fivem/event-argument-count", 7),
+        ("fivem/event-wrong-side", 8),
+        ("fivem/export-argument-count", 9),
+        ("manifest/missing-dependency", 9),
+    ];
+    for (code, line) in expected {
+        assert!(found.contains(&(code.to_string(), line)), "{code} on line {line} missing from {found:?}");
+    }
+
+    let codes: Vec<String> = client.diagnostics_for(SHOP_SERVER).into_iter().map(|(code, _)| code).collect();
+    for code in ["security/client-supplied-source", "security/unvalidated-event-argument", "security/sql-concatenation"]
+    {
+        assert!(codes.contains(&code.to_string()), "{code} missing from {codes:?}");
+    }
+    assert!(codes.contains(&"fivem/event-argument-count".to_string()), "shop:bought takes one argument: {codes:?}");
+
+    let unused = client.diagnostics_for("shop/locales/en.json");
+    assert_eq!(unused, [("qbox/unused-locale-key".to_string(), 3), ("qbox/unused-locale-key".to_string(), 5)]);
+}
+
+#[test]
+fn completes_locale_keys_convars_and_state_bags() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(SHOP_CLIENT);
+    let line = text.lines().count() as u32;
+
+    client.change(SHOP_CLIENT, 2, &format!("{text}print(locale(''))"));
+    assert_eq!(client.completion_labels(SHOP_CLIENT, line, 14), ["buy.success", "buy.failed", "never_used"]);
+
+    client.change(SHOP_CLIENT, 3, &format!("{text}print(GetConvarInt(''))"));
+    assert_eq!(client.completion_labels(SHOP_CLIENT, line, 20), ["shop_debug"]);
+
+    client.change(SHOP_CLIENT, 4, &format!("{text}print(LocalPlayer.state.)"));
+    assert!(client.completion_labels(SHOP_CLIENT, line, 24).contains(&"isShopping".to_string()));
+
+    let (l, c) = pos(&text, "'buy.success'", 3);
+    assert!(client.hover_text(SHOP_CLIENT, l, c).contains("You bought %s"));
+    let definition = client.request("textDocument/definition", client.position_params(SHOP_CLIENT, l, c));
+    assert!(definition[0]["uri"].as_str().unwrap().ends_with("locales/en.json"), "{definition}");
+    assert_eq!(definition[0]["range"]["start"]["line"], 2);
+}
+
+#[test]
+fn finds_and_renames_fields_across_files() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(SHOP_CLIENT);
+    let (l, c) = pos(&text, "Shop.getPrice", 7);
+
+    let mut params = client.position_params(SHOP_CLIENT, l, c);
+    params["context"] = json!({ "includeDeclaration": true });
+    let refs = client.request("textDocument/references", params);
+    let mut files: Vec<String> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_string())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["client.lua", "server.lua", "shared.lua"], "{refs}");
+
+    let mut params = client.position_params(SHOP_CLIENT, l, c);
+    params["newName"] = json!("priceOf");
+    let edit = client.request("textDocument/rename", params);
+    assert_eq!(edit["changes"].as_object().unwrap().len(), 3, "{edit}");
+
+    let (l, c) = pos(&text, "exports.mylib:Ping", 15);
+    let prepared = client.request("textDocument/prepareRename", client.position_params(SHOP_CLIENT, l, c));
+    assert!(prepared.is_object(), "exports defined in the workspace can be renamed: {prepared}");
+}
+
+#[test]
+fn formats_documents() {
+    let mut client = Client::start(fixture_root());
+    client.open_with(SHOP_CLIENT, "local   a=1\nif a   then\nprint( a )\nend\n");
+    let params = json!({ "textDocument": { "uri": client.uri(SHOP_CLIENT) }, "options": { "tabSize": 2, "insertSpaces": true } });
+    let edits = client.request("textDocument/formatting", params);
+    assert_eq!(edits[0]["newText"], "local a = 1\nif a then\n  print(a)\nend\n");
+
+    client.change(SHOP_CLIENT, 2, "local a = 1\n");
+    let params = json!({ "textDocument": { "uri": client.uri(SHOP_CLIENT) }, "options": { "tabSize": 4, "insertSpaces": true } });
+    assert_eq!(client.request("textDocument/formatting", params), json!([]));
 }

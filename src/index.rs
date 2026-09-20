@@ -85,6 +85,8 @@ pub struct FileIndex {
     pub exports: Vec<Symbol>,
     pub events: Vec<EventDef>,
     pub module_return: Option<Type>,
+    pub convars: Vec<SmolStr>,
+    pub state_keys: Vec<SmolStr>,
     pub summary: FileSummary,
 }
 

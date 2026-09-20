@@ -167,8 +167,19 @@ pub fn member_hover(info: &MemberInfo, owner: &Type) -> String {
 
 fn string_hover(ws: &Workspace, doc: &Document, offset: u32) -> Option<(String, Span)> {
     let located = locate(&doc.chunk, offset);
-    let (string, _) = located.string?;
+    let (string, call) = located.string?;
     let ExprKind::String(value) = &string.kind else { return None };
+    let callee = call.and_then(|(call, _)| match &call.kind {
+        ExprKind::Call { callee, .. } => callee.dotted_path(),
+        _ => None,
+    });
+    if callee.as_deref() == Some("locale") {
+        let resource = ws.index.resource_of(doc.file)?;
+        let locale = qbx_lua_analysis::locale::LocaleFile::load(&resource.root)?;
+        let file = locale.path.file_name()?.to_string_lossy().into_owned();
+        let text = locale.text_of(value)?;
+        return Some((format!("`{value}` · locales/{file}\n\n{text}"), string.span));
+    }
     let registrations: Vec<_> =
         ws.index.events().filter(|(_, e)| e.name == *value && e.kind != crate::index::EventKind::Trigger).collect();
     if registrations.is_empty() {

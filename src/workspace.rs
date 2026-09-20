@@ -23,7 +23,29 @@ pub struct Workspace {
     pub roots: Vec<PathBuf>,
     pub library: Vec<PathBuf>,
     pub lint_config: Config,
+    /// Convars assigned with `set`, `setr` or `sets` in the workspace's .cfg files.
+    pub cfg_convars: Vec<SmolStr>,
     locator: ResourceLocator,
+}
+
+fn cfg_convars(roots: &[PathBuf]) -> Vec<SmolStr> {
+    let mut names: Vec<SmolStr> = Vec::new();
+    for root in roots {
+        let files = walkdir::WalkDir::new(root).max_depth(2).into_iter().flatten();
+        for entry in files.filter(|e| e.path().extension().is_some_and(|ext| ext == "cfg")) {
+            let Ok(text) = read_source(entry.path()) else { continue };
+            for line in text.lines() {
+                let mut words = line.split_whitespace();
+                if let (Some("set" | "setr" | "sets"), Some(name)) = (words.next(), words.next()) {
+                    let name = name.trim_matches(['"', '\'']);
+                    if !name.is_empty() && !names.iter().any(|n| n == name) {
+                        names.push(SmolStr::new(name));
+                    }
+                }
+            }
+        }
+    }
+    names
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -77,6 +99,7 @@ impl Workspace {
         stats.files += self.index_dependencies();
         self.link_imports();
         self.reindex_all();
+        self.cfg_convars = cfg_convars(&self.roots);
         stats.resources = self.index.resources.len();
         stats.millis = started.elapsed().as_millis();
         stats
@@ -246,5 +269,40 @@ impl Workspace {
             }
         }
         env
+    }
+}
+
+impl Workspace {
+    /// Event handlers and exports of every indexed file, in the shape the cross-file lint rules use.
+    pub fn crossrefs(&self) -> qbx_lua_analysis::crossref::CrossRefs {
+        use qbx_lua_analysis::crossref::{Arity, CrossRefs};
+
+        use crate::index::EventKind;
+        use crate::types::FunType;
+
+        fn arity(fun: &FunType) -> Arity {
+            let vararg = fun.params.last().is_some_and(|p| p.name == "...");
+            Arity { params: fun.params.len() - usize::from(vararg), vararg }
+        }
+
+        let mut refs = CrossRefs::default();
+        for (_, file) in self.index.files() {
+            let resource = file.resource.and_then(|id| self.index.resource(id)).map(|r| r.name.clone());
+            if let Some(name) = &resource {
+                refs.resources.insert(name.clone());
+            }
+            for event in file.index.events.iter().filter(|e| matches!(e.kind, EventKind::NetEvent | EventKind::Handler))
+            {
+                refs.add_event(event.name.clone(), file.side, event.handler.as_deref().map(arity));
+            }
+            if let Some(resource) = resource {
+                for export in &file.index.exports {
+                    let known = export.ty.as_fun().map(|f| arity(f));
+                    let arity = known.unwrap_or(Arity { params: 0, vararg: true });
+                    refs.exports.insert((resource.clone(), export.name.clone()), arity);
+                }
+            }
+        }
+        refs
     }
 }

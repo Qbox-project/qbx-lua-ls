@@ -16,7 +16,12 @@ pub struct FixData {
     pub edits: Vec<(lsp_types::Range, String)>,
 }
 
-pub fn diagnostics(ws: &Workspace, doc: &Document, rule_overrides: &[(String, Level)]) -> Vec<Diagnostic> {
+pub fn diagnostics(
+    ws: &Workspace,
+    doc: &Document,
+    rule_overrides: &[(String, Level)],
+    crossrefs: &qbx_lua_analysis::crossref::CrossRefs,
+) -> Vec<Diagnostic> {
     let mut config = ws.lint_config.for_file(&doc.path);
     for (code, level) in rule_overrides {
         config.set(code, *level);
@@ -62,6 +67,8 @@ pub fn diagnostics(ws: &Workspace, doc: &Document, rule_overrides: &[(String, Le
             config: &config,
             side: entry.and_then(|f| f.side),
             resource: resource_input,
+            crossrefs: Some(crossrefs),
+            locale: resource.and_then(|r| qbx_lua_analysis::locale::LocaleFile::load(&r.root)).as_ref(),
         })
     };
 

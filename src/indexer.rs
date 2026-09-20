@@ -68,6 +68,25 @@ struct Indexer<'a> {
     depth: u32,
 }
 
+pub const CONVAR_CALLS: &[&str] = &[
+    "GetConvar",
+    "GetConvarInt",
+    "GetConvarBool",
+    "GetConvarFloat",
+    "SetConvar",
+    "SetConvarReplicated",
+    "SetConvarServerInfo",
+];
+
+/// `Entity(x).state`, `LocalPlayer.state`, `Player(src).state` and `GlobalState`.
+pub fn is_state_bag(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Field { name, .. } => name.text == "state",
+        ExprKind::Name(name) => name.text == "GlobalState",
+        _ => false,
+    }
+}
+
 const NET_EVENT_CALLS: &[&str] = &["RegisterNetEvent", "RegisterServerEvent"];
 const HANDLER_CALLS: &[&str] = &["AddEventHandler"];
 const CALLBACK_CALLS: &[&str] = &["lib.callback.register"];
@@ -308,6 +327,7 @@ impl<'a> Indexer<'a> {
             StmtKind::Assign { targets, exprs } => {
                 for (i, target) in targets.iter().enumerate() {
                     self.assignment(stmt, target, exprs.get(i));
+                    self.expr(target);
                 }
                 exprs.iter().for_each(|e| self.expr(e));
             }
@@ -494,6 +514,13 @@ impl<'a> Indexer<'a> {
         }
     }
 
+    fn state_key(&mut self, key: Option<&SmolStr>) {
+        let Some(key) = key.filter(|k| !k.is_empty() && k.as_str() != "set") else { return };
+        if !self.out.state_keys.contains(key) {
+            self.out.state_keys.push(key.clone());
+        }
+    }
+
     /// ox_lib fills its cache through `cache:set('ped', ped)`, so the field names only exist as strings.
     fn keyed_setter(&mut self, base: &Expr, method: &Name, args: &[Expr]) {
         let is_cache = matches!(&base.kind, ExprKind::Name(name) if name.text == "cache");
@@ -537,20 +564,39 @@ impl<'a> Indexer<'a> {
             ExprKind::Call { callee, args, .. } => {
                 if let Some(path) = callee.dotted_path() {
                     self.event(&path, args);
+                    let first = args.first().and_then(|a| a.as_string());
+                    if CONVAR_CALLS.contains(&path.as_str()) {
+                        if let Some(name) = first.filter(|n| !n.is_empty() && !self.out.convars.contains(n)) {
+                            self.out.convars.push(name.clone());
+                        }
+                    } else if path == "AddStateBagChangeHandler" {
+                        self.state_key(first);
+                    }
                 }
                 self.expr(callee);
                 args.iter().for_each(|a| self.expr(a));
             }
             ExprKind::MethodCall { base, method, args, .. } => {
                 self.keyed_setter(base, method, args);
+                if let (true, "set", Some(key)) = (is_state_bag(base), method.text.as_str(), args.first()) {
+                    self.state_key(key.as_string());
+                }
                 self.expr(base);
                 args.iter().for_each(|a| self.expr(a));
             }
             ExprKind::Index { base, index, .. } => {
+                if is_state_bag(base) {
+                    self.state_key(index.as_string());
+                }
                 self.expr(base);
                 self.expr(index);
             }
-            ExprKind::Field { base, .. } => self.expr(base),
+            ExprKind::Field { base, name, .. } => {
+                if is_state_bag(base) {
+                    self.state_key(Some(&name.text));
+                }
+                self.expr(base)
+            }
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);

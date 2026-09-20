@@ -112,6 +112,7 @@ pub fn capabilities() -> ServerCapabilities {
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: semantic_tokens::legend(),
@@ -197,7 +198,7 @@ impl Server {
     }
 
     fn register_watchers(&mut self) {
-        let watchers = ["**/*.lua", "**/qbxlint.toml", "**/.qbxlint.toml"]
+        let watchers = ["**/*.lua", "**/qbxlint.toml", "**/.qbxlint.toml", "**/locales/*.json"]
             .iter()
             .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob.to_string()), kind: None })
             .collect();
@@ -273,9 +274,10 @@ impl Server {
         }
         self.flush_index();
         self.dirty.clear();
+        let crossrefs = self.ws.crossrefs();
         let uris: Vec<Url> = self.docs.keys().cloned().collect();
         for uri in uris {
-            self.publish(&uri);
+            self.publish(&uri, &crossrefs);
         }
     }
 
@@ -313,15 +315,62 @@ impl Server {
         } else {
             self.workspace_reported.iter().filter(|uri| !checked.contains(*uri)).cloned().collect()
         };
+        let crossrefs = self.ws.crossrefs();
+        let mut locale_usage: FxHashMap<crate::index::ResourceId, Vec<qbx_lua_analysis::locale::LocaleUsage>> =
+            FxHashMap::default();
         for (uri, path, file) in targets {
-            if self.docs.contains_key(&uri) {
+            let resource = file.and_then(|id| self.ws.index.file(id)).and_then(|f| f.resource);
+            if let Some(open) = self.docs.get(&uri) {
+                if let Some(resource) = resource {
+                    locale_usage.entry(resource).or_default().push(qbx_lua_analysis::locale::locale_usage(&open.chunk));
+                }
                 continue;
             }
             let Ok(text) = qbx_lua_analysis::project::read_source(&path) else { continue };
             let mut doc = Document::new(uri.clone(), path, 0, text);
             doc.file = file.unwrap_or_else(|| self.ws.index.allocate(&doc.path));
-            let mut found = diagnostics::diagnostics(&self.ws, &doc, &overrides);
+            if let Some(resource) = resource {
+                locale_usage.entry(resource).or_default().push(qbx_lua_analysis::locale::locale_usage(&doc.chunk));
+            }
+            let mut found = diagnostics::diagnostics(&self.ws, &doc, &overrides, &crossrefs);
             found.retain(|d| d.severity != Some(DiagnosticSeverity::HINT));
+            if !found.is_empty() {
+                reported.insert(uri.clone());
+            }
+            if !found.is_empty() || self.workspace_reported.contains(&uri) {
+                self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams {
+                    uri,
+                    diagnostics: found,
+                    version: None,
+                });
+            }
+        }
+        for (resource, usages) in locale_usage {
+            let Some(entry) = self.ws.index.resource(resource) else { continue };
+            let Some(locale) = qbx_lua_analysis::locale::LocaleFile::load(&entry.root) else { continue };
+            let mut config = self.ws.lint_config.for_file(&locale.path);
+            overrides.iter().for_each(|(code, level)| config.set(code, *level));
+            let Some(severity) = config.severity(qbx_lua_analysis::rules::UNUSED_LOCALE_KEY) else { continue };
+            let lines = qbx_lua_syntax::LineIndex::new(&locale.source);
+            let found: Vec<Diagnostic> = qbx_lua_analysis::lint::unused_locale_keys_from(&locale, usages.into_iter())
+                .into_iter()
+                .map(|d| Diagnostic {
+                    range: crate::indexer::span_to_range(&locale.source, &lines, d.span),
+                    severity: Some(match severity {
+                        qbx_lua_analysis::Severity::Error => DiagnosticSeverity::ERROR,
+                        qbx_lua_analysis::Severity::Warning => DiagnosticSeverity::WARNING,
+                        qbx_lua_analysis::Severity::Info => DiagnosticSeverity::INFORMATION,
+                        qbx_lua_analysis::Severity::Hint => DiagnosticSeverity::HINT,
+                    }),
+                    code: Some(NumberOrString::String(d.code.to_string())),
+                    source: Some(diagnostics::SOURCE.to_string()),
+                    message: d.message,
+                    tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                    ..Diagnostic::default()
+                })
+                .collect();
+            let uri = crate::workspace::path_to_uri(&locale.path);
+            reported.remove(&uri);
             if !found.is_empty() {
                 reported.insert(uri.clone());
             }
@@ -349,11 +398,13 @@ impl Server {
         self.stale_resources.insert(resource);
     }
 
-    fn publish(&self, uri: &Url) {
+    fn publish(&self, uri: &Url, crossrefs: &qbx_lua_analysis::crossref::CrossRefs) {
         let Some(doc) = self.docs.get(uri) else { return };
-        let enabled = self.settings.diagnostics.enable.unwrap_or(true);
-        let diagnostics =
-            if enabled { diagnostics::diagnostics(&self.ws, doc, &self.settings.rule_overrides()) } else { Vec::new() };
+        let diagnostics = if self.settings.diagnostics.enable.unwrap_or(true) {
+            diagnostics::diagnostics(&self.ws, doc, &self.settings.rule_overrides(), crossrefs)
+        } else {
+            Vec::new()
+        };
         self.notify::<notif::PublishDiagnostics>(PublishDiagnosticsParams {
             uri: uri.clone(),
             diagnostics,
@@ -435,7 +486,7 @@ impl Server {
                 manifests_changed = true;
             } else if change.typ == FileChangeType::DELETED {
                 self.ws.index.remove_file(&path);
-            } else if !self.docs.contains_key(&change.uri) {
+            } else if path.extension().is_some_and(|e| e == "lua") && !self.docs.contains_key(&change.uri) {
                 self.ws.index_path(&path, FileOrigin::Workspace, None);
             }
         }
@@ -503,11 +554,11 @@ impl Server {
             req::DocumentHighlightRequest::METHOD => {
                 let p: DocumentHighlightParams = params(raw)?;
                 let doc = self.doc(&p.text_document_position_params.text_document.uri)?;
-                reply(references::highlights(doc, p.text_document_position_params.position))
+                reply(references::highlights(&self.ws, doc, p.text_document_position_params.position))
             }
             req::PrepareRenameRequest::METHOD => {
                 let p: TextDocumentPositionParams = params(raw)?;
-                reply(references::prepare_rename(self.doc(&p.text_document.uri)?, p.position))
+                reply(references::prepare_rename(&self.ws, self.doc(&p.text_document.uri)?, p.position))
             }
             req::Rename::METHOD => {
                 let p: RenameParams = params(raw)?;
@@ -543,6 +594,30 @@ impl Server {
                     return reply(SemanticTokens::default());
                 }
                 reply(semantic_tokens::semantic_tokens(&self.ws, self.doc(&p.text_document.uri)?))
+            }
+            req::Formatting::METHOD => {
+                let p: DocumentFormattingParams = params(raw)?;
+                let doc = self.doc(&p.text_document.uri)?;
+                let mut options = self.ws.lint_config.format.clone();
+                // Without a qbxlint.toml the editor's own indentation settings decide.
+                if self.ws.lint_config.root.as_os_str().is_empty() {
+                    options.indent_width = p.options.tab_size.max(1) as usize;
+                    options.use_tabs = !p.options.insert_spaces;
+                }
+                match qbx_lua_fmt::format(&doc.text, &options) {
+                    Ok(text) if text == doc.text => reply(Vec::<TextEdit>::new()),
+                    Ok(text) => {
+                        let whole = Range::new(Position::new(0, 0), doc.position(doc.text.len() as u32));
+                        reply(vec![TextEdit::new(whole, text)])
+                    }
+                    Err(error) => {
+                        self.notify::<notif::ShowMessage>(ShowMessageParams {
+                            typ: MessageType::WARNING,
+                            message: format!("Qbox Lua could not format this file: {error}"),
+                        });
+                        Ok(Value::Null)
+                    }
+                }
             }
             "qbx/status" => Ok(json!({
                 "files": self.ws.index.file_count(),

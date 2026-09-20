@@ -199,7 +199,11 @@ pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<
 
     if (head.ends_with('.') && !head.ends_with("..")) || (head.ends_with(':') && !head.ends_with("::")) {
         let via_colon = head.ends_with(':');
-        let items = with_infer(ws, doc, |infer| member_items(infer, doc, offset, head, via_colon));
+        let mut items = with_infer(ws, doc, |infer| member_items(infer, doc, offset, head, via_colon));
+        let base = head[..head.len() - 1].trim_end();
+        if !via_colon && (base.ends_with(".state") || base.ends_with("GlobalState")) {
+            items.extend(state_key_items(ws));
+        }
         return Some(respond(items, false));
     }
 
@@ -326,6 +330,32 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
     if arg_index == 0 && matches!(path, "lib.onCache") {
         return cache_key_items(ws, doc);
     }
+    if arg_index == 0 && path == "locale" {
+        let locale = ws.index.resource_of(doc.file).and_then(|r| qbx_lua_analysis::locale::LocaleFile::load(&r.root));
+        return locale
+            .iter()
+            .flat_map(|file| &file.keys)
+            .map(|(key, _, text)| {
+                let mut out = item(key, CompletionItemKind::TEXT, 0);
+                out.detail = Some(text.clone());
+                out
+            })
+            .collect();
+    }
+    if arg_index == 0 && crate::indexer::CONVAR_CALLS.contains(&path) {
+        let mut seen = FxHashSet::default();
+        let indexed = ws.index.files().flat_map(|(_, f)| f.index.convars.iter());
+        return ws
+            .cfg_convars
+            .iter()
+            .chain(indexed)
+            .filter(|name| seen.insert((*name).clone()))
+            .map(|name| item(name, CompletionItemKind::CONSTANT, 0))
+            .collect();
+    }
+    if arg_index == 0 && path == "AddStateBagChangeHandler" {
+        return state_key_items(ws);
+    }
     if arg_index == 0 && REQUIRE_CALLS.contains(&path) {
         return module_items(ws, doc);
     }
@@ -333,6 +363,21 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
         return resource_items(ws);
     }
     Vec::new()
+}
+
+/// State bag keys are plain strings that both sides must agree on, so every key seen anywhere is offered.
+fn state_key_items(ws: &Workspace) -> Vec<CompletionItem> {
+    let mut seen = FxHashSet::default();
+    ws.index
+        .files()
+        .flat_map(|(_, f)| f.index.state_keys.iter())
+        .filter(|key| seen.insert((*key).clone()))
+        .map(|key| {
+            let mut out = item(key, CompletionItemKind::FIELD, 1);
+            out.detail = Some("state bag key".into());
+            out
+        })
+        .collect()
 }
 
 /// The value fields of ox_lib's `cache` as seen from this file, read from the indexed ox_lib source.

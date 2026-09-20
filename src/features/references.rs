@@ -7,6 +7,7 @@ use qbx_lua_analysis::project::read_source;
 use qbx_lua_analysis::scope::{resolve, GlobalRefKind, Resolved};
 use qbx_lua_syntax::{parse, LineIndex, Span};
 
+use super::member_refs::{in_document, is_renamable, member_occurrences, member_target};
 use crate::document::Document;
 use crate::index::FileOrigin;
 use crate::indexer::span_to_range;
@@ -92,7 +93,13 @@ pub fn references(
             .map(|o| Location::new(doc.uri.clone(), doc.range(o.span)))
             .collect();
     }
-    let Some(name) = global_name_at(doc, offset) else { return Vec::new() };
+    let Some(name) = global_name_at(doc, offset) else {
+        let Some(target) = member_target(ws, doc, offset) else { return Vec::new() };
+        return member_occurrences(ws, docs, doc, &target)
+            .into_iter()
+            .map(|(uri, range)| Location::new(uri, range))
+            .collect();
+    };
     global_occurrences(ws, docs, doc, name)
         .into_iter()
         .filter(|(_, _, is_definition)| include_declaration || !is_definition)
@@ -100,7 +107,7 @@ pub fn references(
         .collect()
 }
 
-pub fn highlights(doc: &Document, position: Position) -> Vec<DocumentHighlight> {
+pub fn highlights(ws: &Workspace, doc: &Document, position: Position) -> Vec<DocumentHighlight> {
     let offset = doc.offset(position);
     let kind = |write: bool| Some(if write { DocumentHighlightKind::WRITE } else { DocumentHighlightKind::READ });
     if let Some(occurrences) = local_occurrences(doc, offset) {
@@ -109,7 +116,13 @@ pub fn highlights(doc: &Document, position: Position) -> Vec<DocumentHighlight> 
             .map(|o| DocumentHighlight { range: doc.range(o.span), kind: kind(o.write) })
             .collect();
     }
-    let Some(name) = global_name_at(doc, offset) else { return Vec::new() };
+    let Some(name) = global_name_at(doc, offset) else {
+        let Some(target) = member_target(ws, doc, offset) else { return Vec::new() };
+        return in_document(ws, doc, &target)
+            .into_iter()
+            .map(|range| DocumentHighlight { range, kind: Some(DocumentHighlightKind::TEXT) })
+            .collect();
+    };
     doc.resolution
         .globals
         .iter()
@@ -118,9 +131,13 @@ pub fn highlights(doc: &Document, position: Position) -> Vec<DocumentHighlight> 
         .collect()
 }
 
-pub fn prepare_rename(doc: &Document, position: Position) -> Option<PrepareRenameResponse> {
+pub fn prepare_rename(ws: &Workspace, doc: &Document, position: Position) -> Option<PrepareRenameResponse> {
     let offset = doc.offset(position);
-    let (resolved, span) = doc.resolution.resolved_at_offset(offset)?;
+    let Some((resolved, span)) = doc.resolution.resolved_at_offset(offset) else {
+        let target = member_target(ws, doc, offset).filter(|t| is_renamable(ws, t))?;
+        let here = in_document(ws, doc, &target).into_iter().find(|r| r.start <= position && position <= r.end)?;
+        return Some(PrepareRenameResponse::Range(here));
+    };
     if span.is_empty() {
         return None;
     }
@@ -153,9 +170,19 @@ pub fn rename(
     if let Some(occurrences) = local_occurrences(doc, offset) {
         let edits = occurrences.into_iter().map(|o| TextEdit::new(doc.range(o.span), new_name.to_string())).collect();
         changes.insert(doc.uri.clone(), edits);
-    } else {
-        let name = global_name_at(doc, offset)?;
+    } else if let Some(name) = global_name_at(doc, offset) {
         for (uri, range, _) in global_occurrences(ws, docs, doc, name) {
+            changes.entry(uri).or_default().push(TextEdit::new(range, new_name.to_string()));
+        }
+    } else {
+        let target = member_target(ws, doc, offset).filter(|t| is_renamable(ws, t))?;
+        // A member declared by a `---@field` line is located by the whole comment, which must not
+        // be replaced; only ranges that cover exactly the name are edited.
+        let covers_name = |range: &lsp_types::Range| {
+            range.start.line == range.end.line
+                && (range.end.character - range.start.character) as usize == target.name.len()
+        };
+        for (uri, range) in member_occurrences(ws, docs, doc, &target).into_iter().filter(|(_, r)| covers_name(r)) {
             changes.entry(uri).or_default().push(TextEdit::new(range, new_name.to_string()));
         }
     }

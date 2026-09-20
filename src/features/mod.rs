@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod folding;
 pub mod hover;
 pub mod inlay;
+pub mod member_refs;
 pub mod references;
 pub mod semantic_tokens;
 pub mod signature;
