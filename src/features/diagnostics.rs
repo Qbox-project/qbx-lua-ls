@@ -57,10 +57,17 @@ pub fn diagnostics(
             config.set(qbx_lua_analysis::rules::UNDEFINED_GLOBAL, Level::Off);
         }
         let env = resource_id.map(|id| ws.resource_env(id));
+        let started_before = resource.and_then(|r| {
+            let order = qbx_lua_analysis::startup::StartOrder::discover(&r.root)?;
+            Some(order.started_before(&r.name))
+        });
         let resource_input = match (resource, &env) {
-            (Some(resource), Some(env)) => {
-                Some(ResourceInput { name: &resource.name, env, manifest: &resource.manifest })
-            }
+            (Some(resource), Some(env)) => Some(ResourceInput {
+                name: &resource.name,
+                env,
+                manifest: &resource.manifest,
+                started_before: started_before.as_ref(),
+            }),
             _ => None,
         };
         check_file(&FileInput {

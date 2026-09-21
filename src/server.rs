@@ -201,7 +201,7 @@ impl Server {
     }
 
     fn register_watchers(&mut self) {
-        let watchers = ["**/*.lua", "**/qbxlint.toml", "**/.qbxlint.toml", "**/locales/*.json"]
+        let watchers = ["**/*.lua", "**/qbxlint.toml", "**/.qbxlint.toml", "**/locales/*.json", "**/*.cfg"]
             .iter()
             .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob.to_string()), kind: None })
             .collect();
@@ -353,6 +353,10 @@ impl Server {
         }
         for (resource, usages) in locale_usage {
             let Some(entry) = self.ws.index.resource(resource) else { continue };
+            // Encrypted scripts may use any key, so "unused" cannot be decided for such a resource.
+            if qbx_lua_analysis::project::is_escrowed_resource(&entry.root) {
+                continue;
+            }
             let Some(locale) = qbx_lua_analysis::locale::LocaleFile::load(&entry.root) else { continue };
             let mut config = self.ws.lint_config.for_file(&locale.path);
             overrides.iter().for_each(|(code, level)| config.set(code, *level));
@@ -483,7 +487,9 @@ impl Server {
         let mut manifests_changed = false;
         for change in changes {
             let Some(path) = uri_to_path(&change.uri) else { continue };
-            if path.extension().is_some_and(|e| e == "toml") {
+            if path.extension().is_some_and(|e| e == "cfg") {
+                qbx_lua_analysis::startup::clear_cache();
+            } else if path.extension().is_some_and(|e| e == "toml") {
                 if let Some(root) = self.ws.roots.first() {
                     self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
                 }

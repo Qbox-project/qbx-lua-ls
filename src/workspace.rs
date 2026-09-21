@@ -250,6 +250,7 @@ impl Workspace {
     pub fn resource_env(&self, resource: ResourceId) -> ResourceEnv {
         let mut env = ResourceEnv::default();
         let Some(entry) = self.index.resource(resource) else { return env };
+        env.opaque = qbx_lua_analysis::project::is_escrowed_resource(&entry.root);
         for file in entry.files.iter().filter_map(|id| self.index.file(*id)) {
             env.add_summary(&file.index.summary, file.side);
         }

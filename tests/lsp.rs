@@ -166,7 +166,7 @@ const SERVER: &str = "myresource/server/main.lua";
 fn indexes_the_workspace_and_reports_status() {
     let mut client = Client::start(fixture_root());
     let status = client.request("qbx/status", Value::Null);
-    assert_eq!(status["resources"], 3);
+    assert_eq!(status["resources"], 4);
     assert!(status["files"].as_u64().unwrap() >= 10, "{status}");
 }
 
@@ -256,7 +256,9 @@ fn completes_members_globals_natives_and_events() {
     assert!(client.completion_labels(CLIENT, l, c).contains(&"format".to_string()));
 
     let (l, c) = with_line(&mut client, "exports.", 6);
-    assert_eq!(client.completion_labels(CLIENT, l, c), ["mylib", "myresource", "shop"]);
+    let mut resources = client.completion_labels(CLIENT, l, c);
+    resources.sort();
+    assert_eq!(resources, ["late", "mylib", "myresource", "shop"]);
 
     let (l, c) = with_line(&mut client, "exports.mylib:", 7);
     let labels = client.completion_labels(CLIENT, l, c);
@@ -563,6 +565,25 @@ fn formats_documents() {
     client.change(SHOP_CLIENT, 2, "local a = 1\n");
     let params = json!({ "textDocument": { "uri": client.uri(SHOP_CLIENT) }, "options": { "tabSize": 4, "insertSpaces": true } });
     assert_eq!(client.request("textDocument/formatting", params), json!([]));
+}
+
+#[test]
+fn server_cfg_start_order_settles_dependencies() {
+    let mut client = Client::start(fixture_root());
+    let late = client.diagnostics_for("late/server.lua");
+    assert_eq!(late, [], "server.cfg ensures [core] before late, so mylib is already running");
+
+    let uri = client.uri(SHOP_CLIENT).to_string();
+    client.diagnostics_for(SHOP_CLIENT);
+    let messages: Vec<String> = client.diagnostics[&uri]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "manifest/missing-dependency")
+        .map(|d| d["message"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(messages.len(), 1, "shop is ensured before [core]: {messages:?}");
+    assert!(messages[0].contains("server.cfg does not start it earlier"), "{messages:?}");
 }
 
 #[test]
