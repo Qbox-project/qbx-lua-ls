@@ -494,6 +494,8 @@ impl Server {
                     self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
                 }
             } else if is_manifest_file(&path) {
+                // A manifest appearing or vanishing changes which resources count as installed.
+                qbx_lua_analysis::startup::clear_cache();
                 self.ws.reload_manifest(&path);
                 manifests_changed = true;
             } else if change.typ == FileChangeType::DELETED {

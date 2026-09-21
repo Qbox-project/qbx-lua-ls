@@ -587,6 +587,34 @@ fn server_cfg_start_order_settles_dependencies() {
 }
 
 #[test]
+fn bridge_code_is_not_a_dependency_but_missing_resources_are_reported() {
+    let mut client = Client::start(fixture_root());
+    let bridge = client.diagnostics_for("late/bridge.lua");
+    assert_eq!(bridge, [("fivem/resource-not-found".to_string(), 10)], "only the unconditional call matters");
+    assert_eq!(client.diagnostics_for("late/guarded.lua"), [], "everything after the selector guard is optional");
+}
+
+#[test]
+fn completes_resources_and_exports_in_both_spellings() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(CLIENT);
+    let line = text.lines().count() as u32;
+
+    client.change(CLIENT, 2, &format!("{text}exports['']"));
+    let mut resources = client.completion_labels(CLIENT, line, 9);
+    resources.sort();
+    assert_eq!(resources, ["late", "mylib", "myresource", "shop"]);
+
+    client.change(CLIENT, 3, &format!("{text}exports['mylib']:"));
+    let labels = client.completion_labels(CLIENT, line, 17);
+    assert!(labels.contains(&"GetPlayer".to_string()) && labels.contains(&"Ping".to_string()), "{labels:?}");
+
+    client.change(CLIENT, 4, &format!("{text}exports.mylib:GetPlayer(1)"));
+    let hover = client.hover_text(CLIENT, line, 16);
+    assert!(hover.contains("GetPlayer(source: integer)") && hover.contains("Looks a player up"), "{hover}");
+}
+
+#[test]
 fn table_hover_lists_only_the_fields_in_scope() {
     let mut client = Client::start(fixture_root());
     let text = client.open(CLIENT);
