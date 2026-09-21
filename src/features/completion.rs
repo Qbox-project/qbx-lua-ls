@@ -607,7 +607,10 @@ fn scope_items(
 
     let mut incomplete = false;
     if prefix.len() >= 3 {
-        let side = ws.index.file(doc.file).and_then(|f| f.side).unwrap_or(Side::Shared);
+        let file_side = ws.index.file(doc.file).and_then(|f| f.side);
+        let side = qbx_lua_analysis::side_guard::SideRegions::of(&doc.text, &doc.chunk)
+            .effective(offset, file_side)
+            .unwrap_or(Side::Shared);
         let mut count = 0;
         for native in natives().filter(|n| matches(n.name) && n.side.is_available_on(side)) {
             if native.name.starts_with("N_0x") || !seen.insert(native.name.to_string()) {

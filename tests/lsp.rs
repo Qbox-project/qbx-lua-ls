@@ -300,6 +300,15 @@ fn server_side_completion_hides_client_natives() {
     let changed = format!("{text}GetPlayerIdent");
     client.change(SERVER, 3, &changed);
     assert!(client.completion_labels(SERVER, line, 14).contains(&"GetPlayerIdentifierByType".to_string()));
+
+    let text = client.open(CLIENT);
+    let line = text.lines().count() as u32;
+    client.change(CLIENT, 2, &format!("{text}if IsDuplicityVersion() then\n    GetPlayerIdent\nend"));
+    let labels = client.completion_labels(CLIENT, line + 1, 18);
+    assert!(labels.contains(&"GetPlayerIdentifierByType".to_string()), "server branch of a client file: {labels:?}");
+    client.change(CLIENT, 3, &format!("{text}if IsDuplicityVersion() then\n    TriggerClientEvent('a', -1)\nend"));
+    let found = client.diagnostics_for(CLIENT);
+    assert!(!found.iter().any(|(code, _)| code == "fivem/native-wrong-side"), "{found:?}");
 }
 
 #[test]
