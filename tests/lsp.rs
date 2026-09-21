@@ -655,6 +655,34 @@ fn snippets_outrank_the_plain_name() {
 }
 
 #[test]
+fn knows_glm_and_keeps_native_handle_names() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(CLIENT);
+    let line = text.lines().count() as u32;
+    let added = "local veh = GetVehiclePedIsIn(PlayerPedId(), false)\nlocal dir = glm.normalize(vector3(1, 2, 3))\nprint(veh, dir, glm.pi)\nglm.quatLook\nlocal g = require 'glm'\nlocal zone = g.polygon.new({ vector3(0, 0, 0) })\nprint(zone:contains(vector3(0, 0, 0), 2), g.tointeger(1.0))\nveh.";
+    client.change(CLIENT, 2, &format!("{text}{added}"));
+
+    let hover = client.hover_text(CLIENT, line, 7);
+    assert!(hover.contains("local veh: Vehicle"), "{hover}");
+    let native = client.hover_text(CLIENT, line, 16);
+    assert!(native.contains("ped: Ped") && native.contains("): Vehicle"), "{native}");
+    assert_eq!(client.completion_labels(CLIENT, line + 7, 4), Vec::<String>::new(), "a handle has no members");
+
+    let normalize = client.hover_text(CLIENT, line + 1, 20);
+    assert!(normalize.contains("glm.normalize") && normalize.contains("length 1"), "{normalize}");
+    assert!(client.hover_text(CLIENT, line + 2, 22).contains("number"));
+    assert!(client.completion_labels(CLIENT, line + 3, 12).contains(&"quatLookAt".to_string()));
+
+    let zone = client.hover_text(CLIENT, line + 5, 7);
+    assert!(zone.contains("local zone: glm.polygon"), "require 'glm' is the built-in library: {zone}");
+    let contains = client.hover_text(CLIENT, line + 6, 13);
+    assert!(contains.contains("thickness?: number") && contains.contains("boolean"), "{contains}");
+
+    let found = client.diagnostics_for(CLIENT);
+    assert!(!found.iter().any(|(code, l)| code == "undefined-global" && *l >= u64::from(line)), "{found:?}");
+}
+
+#[test]
 fn exports_of_escrowed_resources_are_not_second_guessed() {
     let mut client = Client::start(fixture_root());
     assert_eq!(

@@ -20,6 +20,8 @@ pub enum Type {
     BooleanLit(bool),
     StringLit(SmolStr),
     IntLit(i64),
+    /// A native handle such as `Vehicle` or `Hash`: an integer that keeps its name for display.
+    Handle(SmolStr),
     Named(SmolStr, Vec<Type>),
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
@@ -214,6 +216,7 @@ impl fmt::Display for Type {
             Type::BooleanLit(b) => write!(f, "{b}"),
             Type::StringLit(s) => write!(f, "\"{s}\""),
             Type::IntLit(i) => write!(f, "{i}"),
+            Type::Handle(name) => f.write_str(name),
             Type::Named(name, args) if args.is_empty() => f.write_str(name),
             Type::Named(name, args) => {
                 let args: Vec<String> = args.iter().map(Type::to_string).collect();

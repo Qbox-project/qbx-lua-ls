@@ -59,6 +59,7 @@ node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-
 | Side awareness | natives and globals filtered by client/server, wrong-side errors, event name completion that follows the call direction (`TriggerServerEvent` only offers events handled on the server), `qbx/fileInfo` for editors |
 | Escrow | encrypted (`FXAP`) files are never parsed; a resource with a `.fxap` marker or an encrypted file is opaque, so nothing is claimed about its globals, locale keys, exports or event handlers. Resources with JavaScript/C# scripts or computed export names are treated the same for exports |
 | Events | signature help and inlay hints of `TriggerServerEvent('name', …)`, `TriggerClientEvent`, `lib.callback` and `lib.callback.await` show the parameters of the handler registered for that name instead of the native's `...: any`, with the handler's location |
+| Runtime types | native handles keep their name (`Vehicle`, `Ped`, `Hash`, …) in signatures and hovers but are integers without members, so they never resolve to a resource's class of the same name; the built-in `glm` library (also through `require 'glm'`) including `glm.polygon` and the other geometry helpers |
 | ox_lib | `lib.onCache('vehicle', function(value, oldValue)` types both parameters as `cache.vehicle`; `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
 
 Type sources: `---@class/@field/@alias/@enum/@type/@param/@return/@generic/@overload`, table

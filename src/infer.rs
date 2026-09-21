@@ -221,14 +221,14 @@ pub struct Infer<'a> {
     depth: Cell<u32>,
 }
 
-/// Natives call their handles `Vehicle`, `Ped` and so on. They are plain integers, and resources
-/// (ox_lib, qbx_core) declare unrelated classes under the same names.
+/// Natives call their handles `Vehicle`, `Ped` and so on. They are integers, and resources (ox_lib,
+/// qbx_core) declare unrelated classes under the same names, so they must not resolve as classes.
 const NATIVE_HANDLE_TYPES: &[&str] =
     &["Vehicle", "Ped", "Entity", "Object", "Player", "Hash", "Cam", "Blip", "Pickup", "ScrHandle", "FireId"];
 
 fn native_type(name: &str) -> Type {
     if NATIVE_HANDLE_TYPES.contains(&name) {
-        return Type::named("integer");
+        return Type::Handle(SmolStr::new(name));
     }
     Type::named(name)
 }
@@ -639,6 +639,10 @@ impl<'a> Infer<'a> {
             match (base.dotted_path().as_deref(), args.first()) {
                 (Some("require" | "lib.require" | "lib.load"), Some(arg)) => {
                     if let Some(path) = arg.as_string() {
+                        // `require 'glm'` returns the built-in library, not a file of the resource.
+                        if path == "glm" {
+                            return vec![self.global_type("glm")];
+                        }
                         return vec![Type::Require(path.clone())];
                     }
                 }
