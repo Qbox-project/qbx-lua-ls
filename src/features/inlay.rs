@@ -3,6 +3,7 @@ use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::visit::{self, Visitor};
 use qbx_lua_syntax::Span;
 
+use super::event_call::event_call;
 use super::with_infer;
 use crate::document::Document;
 use crate::infer::Infer;
@@ -13,6 +14,7 @@ const MAX_HINTS: usize = 400;
 struct Hints<'a, 'b> {
     doc: &'a Document,
     infer: &'a Infer<'b>,
+    ws: &'a Workspace,
     range: Span,
     out: Vec<InlayHint>,
 }
@@ -32,6 +34,8 @@ impl Hints<'_, '_> {
             return;
         }
         let Some((fun, _)) = self.infer.callee_fun(base, method) else { return };
+        let event = method.is_none().then(|| event_call(self.ws, self.doc, base, args, &fun)).flatten();
+        let fun = event.map_or(fun, |e| e.fun.into());
         let (skip_params, skip_args) = fun.call_offsets(method.is_some());
         for (arg, param) in args.iter().skip(skip_args).zip(fun.params.iter().skip(skip_params)) {
             if !is_literal(arg) || param.name == "..." || param.name.is_empty() || !self.range.contains(arg.span.start)
@@ -74,7 +78,7 @@ impl<'ast> Visitor<'ast> for Hints<'_, '_> {
 pub fn inlay_hints(ws: &Workspace, doc: &Document, range: Range) -> Vec<InlayHint> {
     let span = Span::new(doc.offset(range.start), doc.offset(range.end));
     with_infer(ws, doc, |infer| {
-        let mut hints = Hints { doc, infer, range: span, out: Vec::new() };
+        let mut hints = Hints { doc, infer, ws, range: span, out: Vec::new() };
         hints.visit_block(&doc.chunk.block);
         hints.out
     })

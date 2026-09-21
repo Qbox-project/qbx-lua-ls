@@ -2,6 +2,7 @@ pub mod code_action;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
+pub mod event_call;
 pub mod folding;
 pub mod hover;
 pub mod inlay;

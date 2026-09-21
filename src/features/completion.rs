@@ -149,15 +149,68 @@ fn item(label: &str, kind: CompletionItemKind, sort_group: u8) -> CompletionItem
 /// Snippets sort ahead of the plain name they share a label with, otherwise accepting the first
 /// `CreateThread` would only insert the word.
 fn snippet_item(label: &str, body: &str, description: &str) -> CompletionItem {
-    let mut out = item(label, CompletionItemKind::SNIPPET, 0);
+    let is_statement = body.starts_with(|c: char| c.is_ascii_lowercase()) && !body.starts_with("lib.");
+    let kind = if is_statement { CompletionItemKind::KEYWORD } else { CompletionItemKind::EVENT };
+    let mut out = item(label, kind, 0);
     out.sort_text = Some(format!("/{label}"));
     out.filter_text = Some(label.to_string());
     out.insert_text = Some(body.to_string());
     out.insert_text_format = Some(InsertTextFormat::SNIPPET);
     out.detail = Some(description.to_string());
     out.label_details = Some(CompletionItemLabelDetails { detail: None, description: Some("snippet".to_string()) });
-    let preview = body.replace("$0", "").replace('\t', "    ");
-    out.documentation = Some(Documentation::MarkupContent(markdown(lua_block(&preview))));
+    out.documentation = Some(Documentation::MarkupContent(markdown(lua_block(&snippet_preview(body)))));
+    out
+}
+
+/// The snippet as it looks right after insertion: `${1:0}` becomes `0`, `${1|a,b|}` becomes `a`.
+pub fn snippet_preview(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(start) = rest.find('$') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + 1..];
+        if let Some(inner) = rest.strip_prefix('{') {
+            let end = inner.find('}').unwrap_or(inner.len());
+            let placeholder = &inner[..end];
+            let shown = match placeholder.split_once([':', '|']) {
+                Some((_, default)) => default.split([',', '|']).next().unwrap_or_default(),
+                None => "",
+            };
+            out.push_str(shown);
+            rest = inner.get(end + 1..).unwrap_or_default();
+        } else {
+            rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        }
+    }
+    out.push_str(rest);
+    out.replace('\t', "    ")
+}
+
+pub struct SnippetInfo {
+    pub label: String,
+    pub description: String,
+    pub body: String,
+}
+
+/// Every snippet the server offers, for the editor's "show snippets" picker.
+pub fn all_snippets(ws: &Workspace, doc: Option<&Document>) -> Vec<SnippetInfo> {
+    let mut out: Vec<SnippetInfo> = SNIPPETS
+        .iter()
+        .map(|(label, body, description)| SnippetInfo {
+            label: label.to_string(),
+            description: description.to_string(),
+            body: body.to_string(),
+        })
+        .collect();
+    let on_cache = match doc {
+        Some(doc) => with_infer(ws, doc, |infer| on_cache_snippet(infer, "lib.")),
+        None => on_cache_item(Vec::new(), "lib."),
+    };
+    out.push(SnippetInfo {
+        label: on_cache.label,
+        description: on_cache.detail.unwrap_or_default(),
+        body: on_cache.insert_text.unwrap_or_default(),
+    });
     out
 }
 
@@ -423,16 +476,16 @@ fn cache_key_items(ws: &Workspace, doc: &Document) -> Vec<CompletionItem> {
 const DEFAULT_CACHE_KEYS: &[&str] = &["ped", "vehicle", "seat", "weapon", "playerId", "serverId", "coords"];
 
 fn on_cache_snippet(infer: &Infer, prefix: &str) -> CompletionItem {
-    let mut keys: Vec<String> = cache_keys(infer).iter().map(|k| k.name.to_string()).collect();
+    on_cache_item(cache_keys(infer).iter().map(|k| k.name.to_string()).collect(), prefix)
+}
+
+fn on_cache_item(mut keys: Vec<String>, prefix: &str) -> CompletionItem {
     if keys.is_empty() {
         keys = DEFAULT_CACHE_KEYS.iter().map(|k| k.to_string()).collect();
     }
     let body =
         format!("{prefix}onCache('${{1|{}|}}', function(${{2:value}}, ${{3:oldValue}})\n\t$0\nend)", keys.join(","));
-    let mut out = snippet_item("onCache", &body, &format!("React to an ox_lib cache change ({})", keys.join(", ")));
-    let preview = "lib.onCache('ped', function(value, oldValue)\n    \nend)";
-    out.documentation = Some(Documentation::MarkupContent(markdown(lua_block(preview))));
-    out
+    snippet_item("onCache", &body, &format!("React to an ox_lib cache change ({})", keys.join(", ")))
 }
 
 fn resource_items(ws: &Workspace) -> Vec<CompletionItem> {

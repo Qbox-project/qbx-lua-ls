@@ -349,6 +349,26 @@ fn signature_help_tracks_the_active_parameter() {
 }
 
 #[test]
+fn trigger_calls_show_the_parameters_of_the_handler() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(SHOP_CLIENT);
+    let (l, c) = pos(&text, "TriggerServerEvent('shop:buy', 'water'", 31);
+    let result = client.request("textDocument/signatureHelp", client.position_params(SHOP_CLIENT, l, c));
+    let signature = &result["signatures"][0];
+    assert_eq!(signature["label"], "TriggerServerEvent(eventName: string, item, amount)");
+    assert_eq!(result["activeParameter"], 1);
+    let note = signature["documentation"]["value"].as_str().unwrap_or_default();
+    assert!(note.contains("shop/server.lua:1"), "{note}");
+
+    let hints = client.request(
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": client.uri(SHOP_CLIENT) }, "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 40, "character": 0 } } }),
+    );
+    let labels: Vec<&str> = hints.as_array().unwrap().iter().filter_map(|h| h["label"].as_str()).collect();
+    assert!(labels.contains(&"item:") && labels.contains(&"amount:"), "{labels:?}");
+}
+
+#[test]
 fn publishes_lint_diagnostics_with_resource_context() {
     let mut client = Client::start(fixture_root());
     client.open(CLIENT);
@@ -621,6 +641,8 @@ fn snippets_outrank_the_plain_name() {
 
     let thread = first_item("CreateThread");
     assert_eq!(thread["labelDetails"]["description"], "snippet", "{thread}");
+    let preview = thread["documentation"]["value"].as_str().unwrap();
+    assert!(preview.contains("Wait(0)") && !preview.contains('$'), "{preview}");
     let body = thread["insertText"].as_str().unwrap();
     assert!(body.contains("while true do") && body.contains("Wait(${1:0})"), "{body}");
 

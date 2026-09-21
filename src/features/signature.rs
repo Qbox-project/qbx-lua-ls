@@ -2,6 +2,7 @@ use lsp_types::{Documentation, ParameterInformation, ParameterLabel, Position, S
 use qbx_fivem_data::native_docs;
 use qbx_lua_syntax::ast::ExprKind;
 
+use super::event_call::event_call;
 use super::{markdown, with_infer};
 use crate::document::Document;
 use crate::locate::locate;
@@ -13,6 +14,8 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
     let site = located.call?;
     with_infer(ws, doc, |infer| {
         let (fun, member) = infer.callee_fun(site.base, site.method)?;
+        let event = site.method.is_none().then(|| event_call(ws, doc, site.base, site.args, &fun)).flatten();
+        let fun = event.as_ref().map_or(fun, |e| e.fun.clone().into());
         let (skip_params, skip_args) = fun.call_offsets(site.method.is_some());
         let params: Vec<_> = fun.params.iter().skip(skip_params).collect();
 
@@ -37,6 +40,17 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
                     .find_map(|(_, s)| s.doc.as_ref().map(|d| d.to_string()))
                     .or_else(|| native_docs(&global.text));
             }
+        }
+
+        if let Some(event) = &event {
+            let note = format!("Parameters of `{}` as handled in `{}`.", event.event, event.handler_location);
+            documentation = Some(documentation.map_or(note.clone(), |d| {
+                format!(
+                    "{note}
+
+{d}"
+                )
+            }));
         }
 
         let mut active = site.active_argument(&doc.text, offset).saturating_sub(skip_args);

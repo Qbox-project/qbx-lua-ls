@@ -221,11 +221,16 @@ pub struct Infer<'a> {
     depth: Cell<u32>,
 }
 
+/// Natives call their handles `Vehicle`, `Ped` and so on. They are plain integers, and resources
+/// (ox_lib, qbx_core) declare unrelated classes under the same names.
+const NATIVE_HANDLE_TYPES: &[&str] =
+    &["Vehicle", "Ped", "Entity", "Object", "Player", "Hash", "Cam", "Blip", "Pickup", "ScrHandle", "FireId"];
+
 fn native_type(name: &str) -> Type {
-    match name {
-        "vector3" => Type::named("vector3"),
-        other => Type::named(other),
+    if NATIVE_HANDLE_TYPES.contains(&name) {
+        return Type::named("integer");
     }
+    Type::named(name)
 }
 
 pub fn native_fun_type(native: &qbx_fivem_data::Native) -> FunType {
@@ -417,7 +422,20 @@ impl<'a> Infer<'a> {
         }
     }
 
+    /// `lib.onCache('vehicle', function(value, oldValue)`: both parameters are `cache.vehicle`.
+    fn on_cache_param(&self, expected: &Expected) -> Option<Type> {
+        let ExprKind::Call { callee, args, .. } = &expected.call.kind else { return None };
+        if callee.dotted_path().as_deref() != Some("lib.onCache") {
+            return None;
+        }
+        let key = args.first()?.as_string()?;
+        self.member(&self.global_type("cache"), key).map(|m| m.ty)
+    }
+
     fn expected_param(&self, expected: &Expected, index: usize) -> Option<Type> {
+        if let Some(ty) = self.on_cache_param(expected).filter(|_| index < 2) {
+            return Some(ty);
+        }
         let fun = match &expected.call.kind {
             ExprKind::Call { callee, .. } => self.expr(callee).as_fun().cloned(),
             ExprKind::MethodCall { base, method, .. } => {

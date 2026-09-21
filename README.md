@@ -58,7 +58,8 @@ node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-
 | Diagnostics | every `qbx-lint` rule with manifest context, for the whole workspace (closed files are linted one at a time and dropped again; a save only re-lints the affected resource), quick fixes, "disable for this line" actions |
 | Side awareness | natives and globals filtered by client/server, wrong-side errors, event name completion that follows the call direction (`TriggerServerEvent` only offers events handled on the server), `qbx/fileInfo` for editors |
 | Escrow | encrypted (`FXAP`) files are never parsed; a resource with a `.fxap` marker or an encrypted file is opaque, so nothing is claimed about its globals, locale keys, exports or event handlers. Resources with JavaScript/C# scripts or computed export names are treated the same for exports |
-| ox_lib | `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
+| Events | signature help and inlay hints of `TriggerServerEvent('name', …)`, `TriggerClientEvent`, `lib.callback` and `lib.callback.await` show the parameters of the handler registered for that name instead of the native's `...: any`, with the handler's location |
+| ox_lib | `lib.onCache('vehicle', function(value, oldValue)` types both parameters as `cache.vehicle`; `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
 
 Type sources: `---@class/@field/@alias/@enum/@type/@param/@return/@generic/@overload`, table
 constructors (also behind `setmetatable`), `function Table.name()` / `Table.name = ...` anywhere

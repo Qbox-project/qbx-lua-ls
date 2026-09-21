@@ -658,6 +658,18 @@ impl Server {
                 };
                 Ok(json!({ "side": side, "resource": resource.map(|r| r.name.to_string()) }))
             }
+            "qbx/snippets" => {
+                let doc =
+                    serde_json::from_value::<TextDocumentIdentifier>(raw).ok().and_then(|p| self.docs.get(&p.uri));
+                let snippets: Vec<Value> = completion::all_snippets(&self.ws, doc)
+                    .into_iter()
+                    .map(|s| {
+                        let preview = completion::snippet_preview(&s.body);
+                        json!({ "label": s.label, "description": s.description, "body": s.body, "preview": preview })
+                    })
+                    .collect();
+                Ok(json!(snippets))
+            }
             other => Err(format!("unsupported request: {other}")),
         }
     }
