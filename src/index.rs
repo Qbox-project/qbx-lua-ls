@@ -89,6 +89,8 @@ pub struct FileIndex {
     pub module_return: Option<Type>,
     pub convars: Vec<SmolStr>,
     pub state_keys: Vec<SmolStr>,
+    /// The file registers exports under names computed at runtime, so the listed ones are not all.
+    pub dynamic_exports: bool,
     pub summary: FileSummary,
 }
 
@@ -118,6 +120,8 @@ pub struct ResourceEntry {
     pub files: Vec<FileId>,
     /// Files pulled in through `@resource/file.lua` manifest entries, with the side they load on.
     pub imports: Vec<(FileId, Side)>,
+    /// Ships a `.fxap` marker or an encrypted file, so part of its code cannot be read.
+    pub escrowed: bool,
 }
 
 type Slot = (FileId, u32);

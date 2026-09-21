@@ -354,7 +354,7 @@ impl Server {
         for (resource, usages) in locale_usage {
             let Some(entry) = self.ws.index.resource(resource) else { continue };
             // Encrypted scripts may use any key, so "unused" cannot be decided for such a resource.
-            if qbx_lua_analysis::project::is_escrowed_resource(&entry.root) {
+            if entry.escrowed {
                 continue;
             }
             let Some(locale) = qbx_lua_analysis::locale::LocaleFile::load(&entry.root) else { continue };

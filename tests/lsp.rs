@@ -166,7 +166,7 @@ const SERVER: &str = "myresource/server/main.lua";
 fn indexes_the_workspace_and_reports_status() {
     let mut client = Client::start(fixture_root());
     let status = client.request("qbx/status", Value::Null);
-    assert_eq!(status["resources"], 4);
+    assert_eq!(status["resources"], 5);
     assert!(status["files"].as_u64().unwrap() >= 10, "{status}");
 }
 
@@ -258,7 +258,7 @@ fn completes_members_globals_natives_and_events() {
     let (l, c) = with_line(&mut client, "exports.", 6);
     let mut resources = client.completion_labels(CLIENT, l, c);
     resources.sort();
-    assert_eq!(resources, ["late", "mylib", "myresource", "shop"]);
+    assert_eq!(resources, ["late", "mylib", "myresource", "shop", "vault"]);
 
     let (l, c) = with_line(&mut client, "exports.mylib:", 7);
     let labels = client.completion_labels(CLIENT, l, c);
@@ -595,6 +595,16 @@ fn bridge_code_is_not_a_dependency_but_missing_resources_are_reported() {
 }
 
 #[test]
+fn exports_of_escrowed_resources_are_not_second_guessed() {
+    let mut client = Client::start(fixture_root());
+    assert_eq!(
+        client.diagnostics_for("late/hidden.lua"),
+        [("fivem/unknown-export".to_string(), 1)],
+        "vault has an encrypted file that may register anything; mylib is fully readable"
+    );
+}
+
+#[test]
 fn completes_resources_and_exports_in_both_spellings() {
     let mut client = Client::start(fixture_root());
     let text = client.open(CLIENT);
@@ -603,7 +613,7 @@ fn completes_resources_and_exports_in_both_spellings() {
     client.change(CLIENT, 2, &format!("{text}exports['']"));
     let mut resources = client.completion_labels(CLIENT, line, 9);
     resources.sort();
-    assert_eq!(resources, ["late", "mylib", "myresource", "shop"]);
+    assert_eq!(resources, ["late", "mylib", "myresource", "shop", "vault"]);
 
     client.change(CLIENT, 3, &format!("{text}exports['mylib']:"));
     let labels = client.completion_labels(CLIENT, line, 17);
@@ -641,10 +651,10 @@ fn table_hover_lists_only_the_fields_in_scope() {
 #[test]
 fn escrow_encrypted_files_are_ignored() {
     let mut client = Client::start(fixture_root());
-    assert_eq!(client.diagnostics_for("shop/escrowed.lua"), [], "closed escrowed files are not linted");
+    assert_eq!(client.diagnostics_for("vault/escrowed.lua"), [], "closed escrowed files are not linted");
 
-    client.open_with("shop/escrowed.lua", "FXAP\u{1}\u{fffd}\u{fffd}garbage(((");
-    assert_eq!(client.diagnostics_for("shop/escrowed.lua"), [], "nor are they when opened in the editor");
+    client.open_with("vault/escrowed.lua", "FXAP\u{1}\u{fffd}\u{fffd}garbage(((");
+    assert_eq!(client.diagnostics_for("vault/escrowed.lua"), [], "nor are they when opened in the editor");
 
     client.open_with(SHOP_CLIENT, &"local = = =\n".repeat(200));
     let found = client.diagnostics_for(SHOP_CLIENT);

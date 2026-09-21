@@ -161,6 +161,7 @@ impl Workspace {
             manifest,
             files: Vec::new(),
             imports: Vec::new(),
+            escrowed: qbx_lua_analysis::project::is_escrowed_resource(root),
         });
         Some(self.index.resources.len() as ResourceId - 1)
     }
@@ -204,7 +205,10 @@ impl Workspace {
                         owned = text;
                         &owned
                     }
-                    Err(_) => return false,
+                    Err(_) => {
+                        self.mark_escrowed(path);
+                        return false;
+                    }
                 }
             }
         };
@@ -212,6 +216,16 @@ impl Workspace {
         let resolution = resolve(&chunk);
         self.index_parsed(path, origin, source, &chunk, &resolution);
         true
+    }
+
+    fn mark_escrowed(&mut self, unreadable: &Path) {
+        if !unreadable.is_file() {
+            return;
+        }
+        let resource = find_manifest_dir(unreadable).and_then(|root| self.ensure_resource(&root));
+        if let Some(id) = resource {
+            self.index.resources[id as usize].escrowed = true;
+        }
     }
 
     pub fn index_parsed(
@@ -250,7 +264,7 @@ impl Workspace {
     pub fn resource_env(&self, resource: ResourceId) -> ResourceEnv {
         let mut env = ResourceEnv::default();
         let Some(entry) = self.index.resource(resource) else { return env };
-        env.opaque = qbx_lua_analysis::project::is_escrowed_resource(&entry.root);
+        env.opaque = entry.escrowed;
         for file in entry.files.iter().filter_map(|id| self.index.file(*id)) {
             env.add_summary(&file.index.summary, file.side);
         }
@@ -287,8 +301,17 @@ impl Workspace {
         }
 
         let mut refs = CrossRefs::default();
+        for resource in &self.index.resources {
+            let hidden = resource.escrowed || resource.manifest.has_non_lua_scripts();
+            if hidden {
+                refs.opaque_resources.insert(resource.name.clone());
+            }
+        }
         for (_, file) in self.index.files() {
             let resource = file.resource.and_then(|id| self.index.resource(id)).map(|r| r.name.clone());
+            if let (true, Some(name)) = (file.index.dynamic_exports, &resource) {
+                refs.opaque_resources.insert(name.clone());
+            }
             if let Some(name) = &resource {
                 refs.resources.insert(name.clone());
             }

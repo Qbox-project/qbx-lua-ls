@@ -69,7 +69,10 @@ pub fn diagnostics(
             }),
             _ => None,
         };
+        let relative_path =
+            resource.map(|r| qbx_lua_analysis::project::relative_slash_path(&r.root, &doc.path)).unwrap_or_default();
         check_file(&FileInput {
+            relative_path: &relative_path,
             source: &doc.text,
             chunk: &doc.chunk,
             resolution: &doc.resolution,

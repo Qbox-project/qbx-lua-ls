@@ -57,6 +57,7 @@ node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-
 | Project knowledge | `locale('…')` keys with their text from `locales/en.json`, convar names from `GetConvar*` calls and `set`/`setr`/`sets` lines in `.cfg` files, state bag keys after `.state.` and in `AddStateBagChangeHandler` |
 | Diagnostics | every `qbx-lint` rule with manifest context, for the whole workspace (closed files are linted one at a time and dropped again; a save only re-lints the affected resource), quick fixes, "disable for this line" actions |
 | Side awareness | natives and globals filtered by client/server, wrong-side errors, event name completion that follows the call direction (`TriggerServerEvent` only offers events handled on the server), `qbx/fileInfo` for editors |
+| Escrow | encrypted (`FXAP`) files are never parsed; a resource with a `.fxap` marker or an encrypted file is opaque, so nothing is claimed about its globals, locale keys, exports or event handlers. Resources with JavaScript/C# scripts or computed export names are treated the same for exports |
 | ox_lib | `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
 
 Type sources: `---@class/@field/@alias/@enum/@type/@param/@return/@generic/@overload`, table

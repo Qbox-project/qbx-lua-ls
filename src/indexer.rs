@@ -488,7 +488,10 @@ impl<'a> Indexer<'a> {
             return;
         }
         let (Some(name_arg), Some(value)) = (args.first(), args.get(1)) else { return };
-        let Some(name) = name_arg.as_string() else { return };
+        let Some(name) = name_arg.as_string() else {
+            self.out.dynamic_exports = true;
+            return;
+        };
         let doc = self.ctx.doc_at(stmt.span.start);
         let ty = match &value.kind {
             ExprKind::Function(func) => Type::Fun(Arc::new(self.infer.fun_type(func, Some(stmt.span.start), false))),
