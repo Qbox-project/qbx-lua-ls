@@ -604,6 +604,35 @@ fn bridge_code_is_not_a_dependency_but_missing_resources_are_reported() {
 }
 
 #[test]
+fn snippets_outrank_the_plain_name() {
+    let mut client = Client::start(fixture_root());
+    let text = client.open(CLIENT);
+    let line = text.lines().count() as u32;
+    let mut version = 1;
+    let mut first_item = |typed: &str| {
+        version += 1;
+        client.change(CLIENT, version, &format!("{text}{typed}"));
+        let params = client.position_params(CLIENT, line, typed.len() as u32);
+        let result = client.request("textDocument/completion", params);
+        let mut items = result["items"].as_array().cloned().unwrap_or_default();
+        items.sort_by_key(|i| i["sortText"].as_str().unwrap_or_default().to_string());
+        items.into_iter().next().unwrap_or(Value::Null)
+    };
+
+    let thread = first_item("CreateThread");
+    assert_eq!(thread["labelDetails"]["description"], "snippet", "{thread}");
+    let body = thread["insertText"].as_str().unwrap();
+    assert!(body.contains("while true do") && body.contains("Wait(${1:0})"), "{body}");
+
+    let on_cache = first_item("oncache");
+    let body = on_cache["insertText"].as_str().unwrap_or_default();
+    assert!(body.starts_with("lib.onCache('${1|ped,"), "falls back to the usual keys without ox_lib: {on_cache}");
+
+    let member = first_item("lib.onCa");
+    assert!(member["insertText"].as_str().unwrap_or_default().starts_with("onCache('${1|"), "{member}");
+}
+
+#[test]
 fn exports_of_escrowed_resources_are_not_second_guessed() {
     let mut client = Client::start(fixture_root());
     assert_eq!(

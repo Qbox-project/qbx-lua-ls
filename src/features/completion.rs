@@ -1,6 +1,6 @@
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionItemTag, CompletionList, CompletionResponse, Documentation,
-    InsertTextFormat, Position,
+    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionItemTag, CompletionList,
+    CompletionResponse, Documentation, InsertTextFormat, Position,
 };
 use qbx_fivem_data::{native, native_docs, natives, Side};
 use qbx_lua_analysis::manifest::KNOWN_DIRECTIVES;
@@ -27,13 +27,13 @@ const KEYWORDS: &[&str] = &[
     "not", "or", "repeat", "return", "then", "true", "until", "while",
 ];
 
+const THREAD_LOOP: &str = "CreateThread(function()\n\twhile true do\n\t\t$0\n\t\tWait(${1:0})\n\tend\nend)";
+
 const SNIPPETS: &[(&str, &str, &str)] = &[
-    ("CreateThread", "CreateThread(function()\n\t$0\nend)", "Start a new thread"),
-    (
-        "thread loop",
-        "CreateThread(function()\n\twhile true do\n\t\t$0\n\t\tWait(${1:0})\n\tend\nend)",
-        "Thread with a loop that yields every iteration",
-    ),
+    ("CreateThread", THREAD_LOOP, "Thread with a loop that yields every iteration"),
+    ("thread", THREAD_LOOP, "Thread with a loop that yields every iteration"),
+    ("CreateThread once", "CreateThread(function()\n\t$0\nend)", "Thread that runs its body once"),
+    ("SetTimeout", "SetTimeout(${1:1000}, function()\n\t$0\nend)", "Run a function after a delay"),
     (
         "RegisterNetEvent",
         "RegisterNetEvent('${1:resource}:${2:event}', function(${3})\n\t$0\nend)",
@@ -144,6 +144,21 @@ fn item(label: &str, kind: CompletionItemKind, sort_group: u8) -> CompletionItem
         sort_text: Some(format!("{sort_group}{label}")),
         ..CompletionItem::default()
     }
+}
+
+/// Snippets sort ahead of the plain name they share a label with, otherwise accepting the first
+/// `CreateThread` would only insert the word.
+fn snippet_item(label: &str, body: &str, description: &str) -> CompletionItem {
+    let mut out = item(label, CompletionItemKind::SNIPPET, 0);
+    out.sort_text = Some(format!("/{label}"));
+    out.filter_text = Some(label.to_string());
+    out.insert_text = Some(body.to_string());
+    out.insert_text_format = Some(InsertTextFormat::SNIPPET);
+    out.detail = Some(description.to_string());
+    out.label_details = Some(CompletionItemLabelDetails { detail: None, description: Some("snippet".to_string()) });
+    let preview = body.replace("$0", "").replace('\t', "    ");
+    out.documentation = Some(Documentation::MarkupContent(markdown(lua_block(&preview))));
+    out
 }
 
 fn member_item(member: &MemberInfo) -> CompletionItem {
@@ -404,17 +419,20 @@ fn cache_key_items(ws: &Workspace, doc: &Document) -> Vec<CompletionItem> {
     })
 }
 
-fn on_cache_snippet(infer: &Infer) -> Option<CompletionItem> {
-    let keys: Vec<String> = cache_keys(infer).iter().map(|k| k.name.to_string()).collect();
+/// What ox_lib caches on the client, for workspaces that do not contain ox_lib itself.
+const DEFAULT_CACHE_KEYS: &[&str] = &["ped", "vehicle", "seat", "weapon", "playerId", "serverId", "coords"];
+
+fn on_cache_snippet(infer: &Infer, prefix: &str) -> CompletionItem {
+    let mut keys: Vec<String> = cache_keys(infer).iter().map(|k| k.name.to_string()).collect();
     if keys.is_empty() {
-        return None;
+        keys = DEFAULT_CACHE_KEYS.iter().map(|k| k.to_string()).collect();
     }
-    let mut out = item("onCache", CompletionItemKind::SNIPPET, 4);
-    out.insert_text =
-        Some(format!("lib.onCache('${{1|{}|}}', function(${{2:value}}, ${{3:oldValue}})\n\t$0\nend)", keys.join(",")));
-    out.insert_text_format = Some(InsertTextFormat::SNIPPET);
-    out.detail = Some(format!("React to an ox_lib cache change ({})", keys.join(", ")));
-    Some(out)
+    let body =
+        format!("{prefix}onCache('${{1|{}|}}', function(${{2:value}}, ${{3:oldValue}})\n\t$0\nend)", keys.join(","));
+    let mut out = snippet_item("onCache", &body, &format!("React to an ox_lib cache change ({})", keys.join(", ")));
+    let preview = "lib.onCache('ped', function(value, oldValue)\n    \nend)";
+    out.documentation = Some(Documentation::MarkupContent(markdown(lua_block(preview))));
+    out
 }
 
 fn resource_items(ws: &Workspace) -> Vec<CompletionItem> {
@@ -495,6 +513,7 @@ fn member_items(infer: &Infer, doc: &Document, offset: u32, head: &str, via_colo
             }
             out
         })
+        .chain((head == "lib.").then(|| on_cache_snippet(infer, "")))
         .collect()
 }
 
@@ -594,15 +613,10 @@ fn scope_items(
         items.push(item(keyword, CompletionItemKind::KEYWORD, 3));
     }
     for (label, body, description) in SNIPPETS.iter().filter(|(label, ..)| matches(label)) {
-        let mut out = item(label, CompletionItemKind::SNIPPET, 4);
-        out.insert_text = Some(body.to_string());
-        out.insert_text_format = Some(InsertTextFormat::SNIPPET);
-        out.detail = Some(description.to_string());
-        out.filter_text = Some(label.to_string());
-        items.push(out);
+        items.push(snippet_item(label, body, description));
     }
     if matches("onCache") {
-        items.extend(on_cache_snippet(infer));
+        items.push(on_cache_snippet(infer, "lib."));
     }
 
     let mut incomplete = false;
