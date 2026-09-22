@@ -1,13 +1,13 @@
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionItemTag, CompletionList,
-    CompletionResponse, Documentation, InsertTextFormat, Position,
+    CompletionResponse, Documentation, InsertTextFormat, Position, TextEdit,
 };
 use qbx_fivem_data::{native, native_docs, natives, Side};
 use qbx_lua_analysis::manifest::KNOWN_DIRECTIVES;
 use qbx_lua_analysis::project::relative_slash_path;
 use qbx_lua_analysis::scope::LocalKind;
 use qbx_lua_syntax::ast::ExprKind;
-use qbx_lua_syntax::{CommentKind, TokenKind};
+use qbx_lua_syntax::{CommentKind, Span, TokenKind};
 use rustc_hash::FxHashSet;
 use serde_json::json;
 
@@ -15,7 +15,7 @@ use super::{lua_block, markdown, with_infer};
 use crate::document::Document;
 use crate::index::{EventKind, FileOrigin, SymbolKind};
 use crate::infer::{Infer, MemberInfo};
-use crate::locate::locate;
+use crate::locate::{locate, string_content_span};
 use crate::types::Type;
 use crate::workspace::Workspace;
 
@@ -356,6 +356,12 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
     let path = path.as_str();
 
     if arg_index == 0 && (EVENT_NAME_CALLS.contains(&path) || CALLBACK_NAME_CALLS.contains(&path)) {
+        // Event names contain punctuation. Give clients the whole string content so a `:`
+        // retrigger keeps filtering from the opening quote and accepting does not duplicate it.
+        let token = &tokens[token_index];
+        let content = string_content_span(token.span, &doc.text)
+            .unwrap_or_else(|| Span::new(token.span.start + 1, token.span.end));
+        let range = doc.range(content);
         let wants_callbacks = CALLBACK_NAME_CALLS.contains(&path);
         let own_side = ws.index.file(doc.file).and_then(|f| f.side);
         let own_side =
@@ -382,6 +388,9 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
                 .filter(|(_, e)| seen.insert(e.name.clone()))
                 .map(|(file, event)| {
                     let mut out = item(&event.name, CompletionItemKind::EVENT, 0);
+                    if range.start.line == range.end.line {
+                        out.text_edit = Some(TextEdit { range, new_text: event.name.to_string() }.into());
+                    }
                     let entry = ws.index.file(file);
                     let origin = entry.and_then(|f| f.resource).and_then(|r| ws.index.resource(r));
                     let side = event.side.map_or(String::new(), |s| format!(" ({})", s.label()));

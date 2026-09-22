@@ -69,13 +69,3 @@ and the last action that triggered the problem.
 Describe the behavior changed by a pull request and list the checks you ran. State any editor
 or platform behavior you could not test. Update the docs and changelog when the user-facing
 behavior changes.
-
-## Releases
-
-Keep the package version, lockfile and changelog in step. Release tags use `v` followed by
-that version, such as `v1.0.0`; the workflow rejects a tag that does not match the package.
-
-Release the matching tag in `qbx-lint` first, then `qbx-lua-ls`, then `qbx-editor`. The server
-and editor release workflows check out that same tag in their dependencies. Each workflow
-builds all supported platforms before attaching the files and checksums to a GitHub Release.
-The editor workflow does not publish to an extension marketplace.

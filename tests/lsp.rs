@@ -514,6 +514,74 @@ fn event_completion_follows_the_call_direction() {
 }
 
 #[test]
+fn event_completion_replaces_the_whole_name_across_colons() {
+    for snippets in [false, true] {
+        let mut client = Client::start_with_capabilities(
+            fixture_root(),
+            json!({ "textDocument": { "completion": { "completionItem": { "snippetSupport": snippets } } } }),
+        );
+        client.open_with(CLIENT, "");
+        let mut version = 1;
+        for (call, name) in [
+            ("TriggerServerEvent", "myresource:server:ping"),
+            ("TriggerLatentServerEvent", "myresource:server:ping"),
+            ("TriggerEvent", "shop:bought"),
+            ("RegisterNetEvent", "myresource:server:ping"),
+            ("lib.callback.await", "myresource:getGarages"),
+        ] {
+            for quote in ['\'', '"'] {
+                for suffix in ["", "stale"] {
+                    for length in 0..=name.len() {
+                        let prefix = &name[..length];
+                        let head = format!("local label = '🚗'; {call}({quote}");
+                        let tail = format!("{suffix}{quote}, 42)");
+                        let text = format!("{head}{prefix}{tail}");
+                        let start = head.encode_utf16().count() as u32;
+                        let cursor = start + prefix.len() as u32;
+                        version += 1;
+                        client.change(CLIENT, version, &text);
+                        let mut params = client.position_params(CLIENT, 0, cursor);
+                        params["context"] = if prefix.ends_with(':') {
+                            json!({ "triggerKind": 2, "triggerCharacter": ":" })
+                        } else {
+                            json!({ "triggerKind": 1 })
+                        };
+                        let result = client.request("textDocument/completion", params);
+                        let item = result["items"].as_array().unwrap().iter().find(|i| i["label"] == name).unwrap();
+                        assert_eq!(
+                            item["textEdit"],
+                            json!({
+                                "range": { "start": { "line": 0, "character": start },
+                                    "end": { "line": 0, "character": cursor + suffix.len() as u32 } },
+                                "newText": name
+                            }),
+                            "{text} at {cursor}"
+                        );
+                        assert_eq!(item["insertTextFormat"], Value::Null);
+                    }
+                }
+                let head = format!("{call}({quote}");
+                let prefix = name.rsplit_once(':').unwrap().0.to_string() + ":";
+                let text = format!("{head}{prefix}");
+                version += 1;
+                client.change(CLIENT, version, &text);
+                let result =
+                    client.request("textDocument/completion", client.position_params(CLIENT, 0, text.len() as u32));
+                let item = result["items"].as_array().unwrap().iter().find(|i| i["label"] == name).unwrap();
+                assert_eq!(
+                    item["textEdit"]["range"],
+                    json!({
+                        "start": { "line": 0, "character": head.len() },
+                        "end": { "line": 0, "character": text.len() }
+                    }),
+                    "unterminated string: {text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn reports_the_side_of_a_file() {
     let mut client = Client::start(fixture_root());
     let info = client.request("qbx/fileInfo", json!({ "uri": client.uri(CLIENT) }));

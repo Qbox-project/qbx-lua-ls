@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2
+
+- Keep event and callback completions anchored to the whole name when typing `:`.
+- Replace the existing event name when accepting a suggestion, preserving its quotes and arguments.
+- Update the shared parser and analysis crates to version 1.0.2.
+
 ## 1.0.1
 
 - Update the shared parser and analysis crates to version 1.0.1.
