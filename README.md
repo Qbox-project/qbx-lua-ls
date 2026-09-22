@@ -24,9 +24,9 @@ folders. Add other locations through the `library` setting.
 
 ## Build and run
 
-The release workflow produces archives for Windows x64, Linux x64/ARM64 (musl), and macOS
-x64/ARM64. Download a matching archive from [Releases](https://github.com/Qbox-project/qbx-lua-ls/releases)
-when available, or build from source using the steps below.
+Download the archive for your platform from [Releases](https://github.com/Qbox-project/qbx-lua-ls/releases).
+Archives cover Windows x64, Linux x64/ARM64 (musl), and macOS x64/ARM64. You can also build
+from source using the steps below.
 
 Install stable Rust and keep these repositories next to each other. The server currently uses
 local path dependencies from `qbx-lint`.
