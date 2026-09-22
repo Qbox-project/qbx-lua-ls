@@ -75,6 +75,8 @@ pub struct Server {
     ws: Workspace,
     docs: Documents,
     settings: Settings,
+    snippet_support: bool,
+    watched_files_registration: bool,
     dirty: FxHashSet<Url>,
     /// Closed files that currently have diagnostics published, so they can be cleared again.
     workspace_reported: FxHashSet<Url>,
@@ -166,11 +168,28 @@ impl Server {
         let mut ws = Workspace::default();
         ws.roots = workspace_roots(&params);
         ws.library = settings.library.iter().map(PathBuf::from).collect();
+        let snippet_support = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text| text.completion.as_ref())
+            .and_then(|completion| completion.completion_item.as_ref())
+            .and_then(|item| item.snippet_support)
+            .unwrap_or(false);
+        let watched_files_registration = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+            .and_then(|watched| watched.dynamic_registration)
+            .unwrap_or(false);
         Self {
             connection,
             ws,
             docs: Documents::default(),
             settings,
+            snippet_support,
+            watched_files_registration,
             dirty: FxHashSet::default(),
             workspace_reported: FxHashSet::default(),
             workspace_stale: true,
@@ -201,6 +220,9 @@ impl Server {
     }
 
     fn register_watchers(&mut self) {
+        if !self.watched_files_registration {
+            return;
+        }
         let watchers = ["**/*.lua", "**/qbxlint.toml", "**/.qbxlint.toml", "**/locales/*.json", "**/*.cfg"]
             .iter()
             .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob.to_string()), kind: None })
@@ -263,6 +285,8 @@ impl Server {
     fn flush_index(&mut self) {
         for uri in &self.dirty {
             if let Some(doc) = self.docs.get_mut(uri) {
+                // A full scan reallocates file IDs, including the reserved slots for manifests.
+                doc.file = self.ws.index.allocate(&doc.path);
                 let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
                 if !doc.is_manifest() && is_source {
                     doc.file =
@@ -536,7 +560,7 @@ impl Server {
             req::Completion::METHOD => {
                 let p: CompletionParams = params(raw)?;
                 let doc = self.doc(&p.text_document_position.text_document.uri)?;
-                reply(completion::completion(&self.ws, doc, p.text_document_position.position))
+                reply(completion::completion(&self.ws, doc, p.text_document_position.position, self.snippet_support))
             }
             req::ResolveCompletionItem::METHOD => reply(completion::resolve(params(raw)?)),
             req::HoverRequest::METHOD => {
@@ -640,8 +664,15 @@ impl Server {
                 "natives": qbx_fivem_data::native_count(),
             })),
             "qbx/reindex" => {
+                qbx_lua_analysis::startup::clear_cache();
                 let stats = self.ws.scan();
                 self.dirty.extend(self.docs.keys().cloned());
+                // Restore unsaved text before any request or closed-file diagnostic can see the
+                // rebuilt index. A second pass settles types shared between open documents.
+                self.flush_index();
+                self.ws.link_imports();
+                self.flush_index();
+                self.stale_resources.clear();
                 self.workspace_stale = true;
                 Ok(json!({ "files": stats.files, "resources": stats.resources, "millis": stats.millis as u64 }))
             }

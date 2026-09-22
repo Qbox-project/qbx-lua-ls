@@ -40,18 +40,20 @@ pub fn event_call(ws: &Workspace, doc: &Document, callee: &Expr, args: &[Expr], 
         }
     };
 
-    let candidates =
-        ws.index.events().filter(|(_, e)| e.name == *name && wanted.contains(&e.kind) && e.handler.is_some());
-    let (file, event) = candidates.max_by_key(|(file, _)| {
-        let side = ws.index.file(*file).and_then(|f| f.side);
-        matches!((target, side), (Some(target), Some(side)) if side.is_available_on(target))
-    })?;
+    let candidates = ws
+        .index
+        .events()
+        .filter(|(_, e)| e.name == *name && wanted.contains(&e.kind) && e.handler.is_some())
+        .filter(|(_, e)| !matches!((target, e.side), (Some(target), Some(side)) if !side.is_available_on(target)));
+    let (file, event) = candidates.max_by_key(
+        |(_, event)| matches!((target, event.side), (Some(target), Some(side)) if side.is_available_on(target)),
+    )?;
     let handler = event.handler.as_deref()?;
     let entry = ws.index.file(file)?;
 
     // Server callbacks receive the calling player as their first parameter.
     let is_callback = event.kind == EventKind::Callback;
-    let drops_source = is_callback && entry.side != Some(Side::Client) && !handler.params.is_empty();
+    let drops_source = is_callback && event.side != Some(Side::Client) && !handler.params.is_empty();
 
     let mut params: Vec<Param> = native.params.iter().take(skip).cloned().collect();
     while params.len() < skip {

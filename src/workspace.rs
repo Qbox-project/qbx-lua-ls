@@ -70,9 +70,9 @@ impl Workspace {
             let id = self.index.allocate(&path);
             let chunk = parse(stub.source);
             let resolution = resolve(&chunk);
-            let index = index_file(id, stub.source, &chunk, &resolution, &self.index);
             let uri = Url::parse(&format!("qbx-stub:///{}", stub.name)).expect("static url");
             let side = (stub.side != Side::Shared).then_some(stub.side);
+            let index = index_file(id, stub.source, &chunk, &resolution, &self.index, side);
             self.index.set_file(id, FileEntry { path, uri, origin: FileOrigin::Stub, resource: None, side, index });
         }
     }
@@ -80,9 +80,10 @@ impl Workspace {
     pub fn scan(&mut self) -> ScanStats {
         let started = std::time::Instant::now();
         let mut stats = ScanStats::default();
-        if let Some(root) = self.roots.first() {
-            self.lint_config = Config::discover(root).ok().flatten().unwrap_or_default();
-        }
+        self.index.clear_workspace();
+        self.locator = ResourceLocator::default();
+        self.lint_config =
+            self.roots.first().and_then(|root| Config::discover(root).ok().flatten()).unwrap_or_default();
         let roots: Vec<(PathBuf, FileOrigin)> = self
             .roots
             .iter()
@@ -91,7 +92,11 @@ impl Workspace {
             .collect();
         for (root, origin) in roots {
             for path in lua_files_under(&root, &self.lint_config) {
-                if !is_manifest_file(&path) && self.index_path(&path, origin, None) {
+                if is_manifest_file(&path) {
+                    if let Some(root) = path.parent() {
+                        self.ensure_resource(root);
+                    }
+                } else if self.index_path(&path, origin, None) {
                     stats.files += 1;
                 }
             }
@@ -137,6 +142,7 @@ impl Workspace {
                 continue;
             }
             let Some(root) = self.locator.locate(&from, &name) else { continue };
+            self.ensure_resource(&root);
             for path in lua_files_under(&root, &self.lint_config) {
                 if !is_manifest_file(&path) && self.index_path(&path, FileOrigin::Library, None) {
                     indexed += 1;
@@ -239,7 +245,7 @@ impl Workspace {
         let id = self.index.allocate(path);
         let (resource, side) = self.side_and_resource(path);
         let origin = self.index.file(id).map_or(origin, |f| f.origin);
-        let file_index = index_file(id, source, chunk, resolution, &self.index);
+        let file_index = index_file(id, source, chunk, resolution, &self.index, side);
         let entry =
             FileEntry { path: path.to_path_buf(), uri: path_to_uri(path), origin, resource, side, index: file_index };
         self.index.set_file(id, entry);
@@ -317,7 +323,7 @@ impl Workspace {
             }
             for event in file.index.events.iter().filter(|e| matches!(e.kind, EventKind::NetEvent | EventKind::Handler))
             {
-                refs.add_event(event.name.clone(), file.side, event.handler.as_deref().map(arity));
+                refs.add_event(event.name.clone(), event.side, event.handler.as_deref().map(arity));
             }
             if let Some(resource) = resource {
                 for export in &file.index.exports {

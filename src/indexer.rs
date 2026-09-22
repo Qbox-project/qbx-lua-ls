@@ -2,7 +2,9 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use lsp_types::{Position, Range};
+use qbx_fivem_data::Side;
 use qbx_lua_analysis::scope::{Resolution, Resolved};
+use qbx_lua_analysis::side_guard::SideRegions;
 use qbx_lua_analysis::summary::summarize;
 use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
@@ -42,12 +44,28 @@ pub fn render_doc(doc: &DocGroup) -> Option<Arc<str>> {
     (!out.is_empty()).then(|| Arc::from(out))
 }
 
-pub fn index_file(file: FileId, source: &str, chunk: &Chunk, resolution: &Resolution, index: &Index) -> FileIndex {
+pub fn index_file(
+    file: FileId,
+    source: &str,
+    chunk: &Chunk,
+    resolution: &Resolution,
+    index: &Index,
+    side: Option<Side>,
+) -> FileIndex {
     let ctx = FileContext::new(file, source, chunk, resolution);
     let infer = Infer::new(&ctx, index);
     let lines = LineIndex::new(source);
-    let mut indexer =
-        Indexer { file, source, lines: &lines, ctx: &ctx, infer: &infer, out: FileIndex::default(), depth: 0 };
+    let mut indexer = Indexer {
+        file,
+        source,
+        lines: &lines,
+        ctx: &ctx,
+        infer: &infer,
+        side,
+        regions: SideRegions::of(source, chunk),
+        out: FileIndex::default(),
+        depth: 0,
+    };
     indexer.doc_comments(&chunk.comments);
     indexer.block(&chunk.block);
     if let Some(Stmt { kind: StmtKind::Return(exprs), .. }) = chunk.block.stmts.last() {
@@ -64,6 +82,8 @@ struct Indexer<'a> {
     lines: &'a LineIndex,
     ctx: &'a FileContext<'a>,
     infer: &'a Infer<'a>,
+    side: Option<Side>,
+    regions: SideRegions,
     out: FileIndex,
     depth: u32,
 }
@@ -422,41 +442,48 @@ impl<'a> Indexer<'a> {
                 self.out.globals.push(symbol);
             }
             ExprKind::Field { base, name, .. } if !name.is_missing() => {
-                if let ExprKind::Name(root) = &base.kind {
-                    if self.is_global(root) && matches!(root.text.as_str(), "_ENV" | "_G") {
-                        let symbol = self.value_symbol(name, value, stmt.span.start, &name.text.clone(), 0);
-                        self.out.globals.push(symbol);
-                        return;
-                    }
+                self.member_assignment(stmt, base, name, value);
+            }
+            ExprKind::Index { base, index, .. } => {
+                if let Some(text) = index.as_string() {
+                    let name = Name { text: text.clone(), span: index.span };
+                    self.member_assignment(stmt, base, &name, value);
                 }
-                let owner = match base.dotted_path() {
-                    Some(path) if self.root_is_global(base) => {
-                        let own_class = match &base.kind {
-                            ExprKind::Name(root) => self.global_class(&root.text),
-                            _ => None,
-                        };
-                        match own_class
-                            .map(|class| Type::Named(class, Vec::new()))
-                            .unwrap_or_else(|| self.infer.expr(base))
-                        {
-                            Type::Named(class, _) => class,
-                            _ => SmolStr::new(path),
-                        }
-                    }
-                    _ => match self.owner_of(&self.infer.expr(base)) {
-                        Some(owner) => owner,
-                        None => return,
-                    },
-                };
-                let nested = format!("{owner}.{}", name.text);
-                let mut symbol = self.value_symbol(name, value, stmt.span.start, &nested, 1);
-                if symbol.kind == SymbolKind::Variable {
-                    symbol.kind = SymbolKind::Field;
-                }
-                self.push_member(owner, symbol);
             }
             _ => {}
         }
+    }
+
+    fn member_assignment(&mut self, stmt: &Stmt, base: &Expr, name: &Name, value: Option<&Expr>) {
+        if let ExprKind::Name(root) = &base.kind {
+            if self.is_global(root) && matches!(root.text.as_str(), "_ENV" | "_G") {
+                let symbol = self.value_symbol(name, value, stmt.span.start, &name.text.clone(), 0);
+                self.out.globals.push(symbol);
+                return;
+            }
+        }
+        let owner = match base.dotted_path() {
+            Some(path) if self.root_is_global(base) => {
+                let own_class = match &base.kind {
+                    ExprKind::Name(root) => self.global_class(&root.text),
+                    _ => None,
+                };
+                match own_class.map(|class| Type::Named(class, Vec::new())).unwrap_or_else(|| self.infer.expr(base)) {
+                    Type::Named(class, _) => class,
+                    _ => SmolStr::new(path),
+                }
+            }
+            _ => match self.owner_of(&self.infer.expr(base)) {
+                Some(owner) => owner,
+                None => return,
+            },
+        };
+        let nested = format!("{owner}.{}", name.text);
+        let mut symbol = self.value_symbol(name, value, stmt.span.start, &nested, 1);
+        if symbol.kind == SymbolKind::Variable {
+            symbol.kind = SymbolKind::Field;
+        }
+        self.push_member(owner, symbol);
     }
 
     fn root_is_global(&self, expr: &Expr) -> bool {
@@ -558,7 +585,7 @@ impl<'a> Indexer<'a> {
         self.push_member(owner, symbol);
     }
 
-    fn event(&mut self, path: &str, args: &[Expr]) {
+    fn event(&mut self, path: &str, args: &[Expr], offset: u32) {
         let kind = if NET_EVENT_CALLS.contains(&path) {
             EventKind::NetEvent
         } else if HANDLER_CALLS.contains(&path) {
@@ -576,7 +603,13 @@ impl<'a> Indexer<'a> {
             ExprKind::Function(func) => Some(Arc::new(self.infer.fun_type(func, None, false))),
             _ => None,
         });
-        self.out.events.push(EventDef { name: name.clone(), kind, handler, range: self.range(name_arg.span) });
+        self.out.events.push(EventDef {
+            name: name.clone(),
+            kind,
+            side: self.regions.effective(offset, self.side),
+            handler,
+            range: self.range(name_arg.span),
+        });
     }
 
     fn expr(&mut self, expr: &Expr) {
@@ -584,7 +617,7 @@ impl<'a> Indexer<'a> {
             ExprKind::Function(func) => self.func_body(func),
             ExprKind::Call { callee, args, .. } => {
                 if let Some(path) = callee.dotted_path() {
-                    self.event(&path, args);
+                    self.event(&path, args, expr.span.start);
                     let first = args.first().and_then(|a| a.as_string());
                     if CONVAR_CALLS.contains(&path.as_str()) {
                         if let Some(name) = first.filter(|n| !n.is_empty() && !self.out.convars.contains(n)) {

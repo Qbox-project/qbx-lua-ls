@@ -96,6 +96,7 @@ pub fn references(
     let Some(name) = global_name_at(doc, offset) else {
         let Some(target) = member_target(ws, doc, offset) else { return Vec::new() };
         return member_occurrences(ws, docs, doc, &target)
+            .unwrap_or_default()
             .into_iter()
             .map(|(uri, range)| Location::new(uri, range))
             .collect();
@@ -176,13 +177,7 @@ pub fn rename(
         }
     } else {
         let target = member_target(ws, doc, offset).filter(|t| is_renamable(ws, t))?;
-        // A member declared by a `---@field` line is located by the whole comment, which must not
-        // be replaced; only ranges that cover exactly the name are edited.
-        let covers_name = |range: &lsp_types::Range| {
-            range.start.line == range.end.line
-                && (range.end.character - range.start.character) as usize == target.name.len()
-        };
-        for (uri, range) in member_occurrences(ws, docs, doc, &target).into_iter().filter(|(_, r)| covers_name(r)) {
+        for (uri, range) in member_occurrences(ws, docs, doc, &target)? {
             changes.entry(uri).or_default().push(TextEdit::new(range, new_name.to_string()));
         }
     }

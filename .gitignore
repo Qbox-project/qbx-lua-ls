@@ -1,1 +1,7 @@
 /target
+
+# Local files
+.DS_Store
+Thumbs.db
+/qbx-lua-ls-*.zip
+/qbx-lua-ls-*.tar.gz

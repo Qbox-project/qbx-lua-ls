@@ -241,14 +241,14 @@ fn identifier_prefix(before: &str) -> &str {
     &before[start..]
 }
 
-pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<CompletionResponse> {
+pub fn completion(ws: &Workspace, doc: &Document, position: Position, snippets: bool) -> Option<CompletionResponse> {
     let offset = doc.offset(position);
     let line_start = doc.lines.line_start(position.line) as usize;
     let before = doc.text.get(line_start..offset as usize)?;
 
     if let Some(comment) = doc.chunk.comments.iter().find(|c| c.span.start < offset && offset <= c.span.end) {
         let is_doc = comment.kind == CommentKind::Line && comment.span.text(&doc.text).starts_with("---");
-        return is_doc.then(|| respond(doc_comment_items(ws, before), false));
+        return is_doc.then(|| respond(doc_comment_items(ws, before, snippets), false));
     }
 
     let in_string = doc.chunk.tokens.iter().position(|t| {
@@ -270,7 +270,7 @@ pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<
 
     if (head.ends_with('.') && !head.ends_with("..")) || (head.ends_with(':') && !head.ends_with("::")) {
         let via_colon = head.ends_with(':');
-        let mut items = with_infer(ws, doc, |infer| member_items(infer, doc, offset, head, via_colon));
+        let mut items = with_infer(ws, doc, |infer| member_items(infer, doc, offset, head, via_colon, snippets));
         let base = head[..head.len() - 1].trim_end();
         if !via_colon && (base.ends_with(".state") || base.ends_with("GlobalState")) {
             items.extend(state_key_items(ws));
@@ -279,7 +279,7 @@ pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<
     }
 
     if doc.is_manifest() {
-        return Some(respond(manifest_items(before, prefix), false));
+        return Some(respond(manifest_items(before, prefix, snippets), false));
     }
 
     if head.ends_with('{') || head.ends_with(',') || head.is_empty() {
@@ -291,7 +291,7 @@ pub fn completion(ws: &Workspace, doc: &Document, position: Position) -> Option<
     if prefix.is_empty() {
         return None;
     }
-    let (items, incomplete) = with_infer(ws, doc, |infer| scope_items(ws, infer, doc, offset, prefix));
+    let (items, incomplete) = with_infer(ws, doc, |infer| scope_items(ws, infer, doc, offset, prefix, snippets));
     Some(respond(items, incomplete))
 }
 
@@ -301,7 +301,7 @@ fn respond(mut items: Vec<CompletionItem>, incomplete: bool) -> CompletionRespon
     CompletionResponse::List(CompletionList { is_incomplete: incomplete || truncated, items })
 }
 
-fn doc_comment_items(ws: &Workspace, before: &str) -> Vec<CompletionItem> {
+fn doc_comment_items(ws: &Workspace, before: &str, snippets: bool) -> Vec<CompletionItem> {
     let Some(at) = before.rfind("---") else { return Vec::new() };
     let content = before[at + 3..].trim_start();
     if let Some(tag_prefix) = content.strip_prefix('@').filter(|rest| !rest.contains(char::is_whitespace)) {
@@ -310,8 +310,11 @@ fn doc_comment_items(ws: &Workspace, before: &str) -> Vec<CompletionItem> {
             .filter(|(tag, _)| tag.starts_with(tag_prefix))
             .map(|(tag, snippet)| {
                 let mut out = item(tag, CompletionItemKind::KEYWORD, 0);
-                out.insert_text = Some(snippet.to_string());
-                out.insert_text_format = Some(InsertTextFormat::SNIPPET);
+                out.insert_text =
+                    Some(if snippets { snippet.to_string() } else { tag.trim_start_matches('@').to_string() });
+                if snippets {
+                    out.insert_text_format = Some(InsertTextFormat::SNIPPET);
+                }
                 out
             })
             .collect();
@@ -355,6 +358,8 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
     if arg_index == 0 && (EVENT_NAME_CALLS.contains(&path) || CALLBACK_NAME_CALLS.contains(&path)) {
         let wants_callbacks = CALLBACK_NAME_CALLS.contains(&path);
         let own_side = ws.index.file(doc.file).and_then(|f| f.side);
+        let own_side =
+            qbx_lua_analysis::side_guard::SideRegions::of(&doc.text, &doc.chunk).effective(call.span.start, own_side);
         // Where the handler has to live for this call to reach it.
         let target_side = match path {
             "TriggerServerEvent" | "TriggerLatentServerEvent" => Some(Side::Server),
@@ -367,22 +372,19 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
             },
             _ => None,
         };
-        let handled_on_target = |file| {
-            let side = ws.index.file(file).and_then(|f| f.side);
-            !matches!((target_side, side), (Some(target), Some(side)) if !side.is_available_on(target))
-        };
+        let handled_on_target = |side: Option<Side>| !matches!((target_side, side), (Some(target), Some(side)) if !side.is_available_on(target));
         let candidates = |strict: bool| {
             let mut seen = FxHashSet::default();
             ws.index
                 .events()
                 .filter(|(_, e)| (e.kind == EventKind::Callback) == wants_callbacks || e.kind == EventKind::Trigger)
-                .filter(|(file, e)| !strict || (e.kind != EventKind::Trigger && handled_on_target(*file)))
+                .filter(|(_, e)| !strict || (e.kind != EventKind::Trigger && handled_on_target(e.side)))
                 .filter(|(_, e)| seen.insert(e.name.clone()))
                 .map(|(file, event)| {
                     let mut out = item(&event.name, CompletionItemKind::EVENT, 0);
                     let entry = ws.index.file(file);
                     let origin = entry.and_then(|f| f.resource).and_then(|r| ws.index.resource(r));
-                    let side = entry.and_then(|f| f.side).map_or(String::new(), |s| format!(" ({})", s.label()));
+                    let side = event.side.map_or(String::new(), |s| format!(" ({})", s.label()));
                     out.detail = match (&event.handler, origin) {
                         (Some(handler), Some(resource)) => {
                             Some(format!("{}{side} · {}", resource.name, handler.signature("")))
@@ -395,8 +397,7 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
                 })
                 .collect::<Vec<_>>()
         };
-        let strict = if target_side.is_some() { candidates(true) } else { Vec::new() };
-        return if strict.is_empty() { candidates(false) } else { strict };
+        return candidates(target_side.is_some());
     }
     if arg_index == 0 && matches!(path, "lib.onCache") {
         return cache_key_items(ws, doc);
@@ -524,7 +525,7 @@ fn manifest_path_items(ws: &Workspace, doc: &Document) -> Vec<CompletionItem> {
     items
 }
 
-fn manifest_items(before: &str, prefix: &str) -> Vec<CompletionItem> {
+fn manifest_items(before: &str, prefix: &str, snippets: bool) -> Vec<CompletionItem> {
     if before.trim_start().len() != prefix.len() {
         return Vec::new();
     }
@@ -532,6 +533,9 @@ fn manifest_items(before: &str, prefix: &str) -> Vec<CompletionItem> {
         .iter()
         .map(|directive| {
             let mut out = item(directive, CompletionItemKind::PROPERTY, 0);
+            if !snippets {
+                return out;
+            }
             let snippet = match *directive {
                 "fx_version" => "fx_version '${1|cerulean,bodacious,adamant|}'".to_string(),
                 "game" => "game '${1|gta5,rdr3|}'".to_string(),
@@ -546,7 +550,14 @@ fn manifest_items(before: &str, prefix: &str) -> Vec<CompletionItem> {
         .collect()
 }
 
-fn member_items(infer: &Infer, doc: &Document, offset: u32, head: &str, via_colon: bool) -> Vec<CompletionItem> {
+fn member_items(
+    infer: &Infer,
+    doc: &Document,
+    offset: u32,
+    head: &str,
+    via_colon: bool,
+    snippets: bool,
+) -> Vec<CompletionItem> {
     let located = locate(&doc.chunk, offset);
     let base_type = match &located.member {
         Some(access) => infer.expr(access.base()),
@@ -566,7 +577,7 @@ fn member_items(infer: &Infer, doc: &Document, offset: u32, head: &str, via_colo
             }
             out
         })
-        .chain((head == "lib.").then(|| on_cache_snippet(infer, "")))
+        .chain((snippets && head == "lib.").then(|| on_cache_snippet(infer, "")))
         .collect()
 }
 
@@ -626,6 +637,7 @@ fn scope_items(
     doc: &Document,
     offset: u32,
     prefix: &str,
+    snippets: bool,
 ) -> (Vec<CompletionItem>, bool) {
     let matches = |name: &str| name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix);
     let mut items = Vec::new();
@@ -665,11 +677,13 @@ fn scope_items(
     for keyword in KEYWORDS.iter().filter(|k| matches(k)) {
         items.push(item(keyword, CompletionItemKind::KEYWORD, 3));
     }
-    for (label, body, description) in SNIPPETS.iter().filter(|(label, ..)| matches(label)) {
-        items.push(snippet_item(label, body, description));
-    }
-    if matches("onCache") {
-        items.push(on_cache_snippet(infer, "lib."));
+    if snippets {
+        for (label, body, description) in SNIPPETS.iter().filter(|(label, ..)| matches(label)) {
+            items.push(snippet_item(label, body, description));
+        }
+        if matches("onCache") {
+            items.push(on_cache_snippet(infer, "lib."));
+        }
     }
 
     let mut incomplete = false;

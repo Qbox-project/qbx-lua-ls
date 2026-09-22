@@ -37,7 +37,7 @@ pub fn target_at(infer: &Infer, doc: &Document, offset: u32) -> Option<Target> {
     let located = locate(&doc.chunk, offset);
     if let Some(access) = located.member {
         let owner = infer.expr(access.base());
-        let name = access.name();
+        let name = access.name(&doc.text)?;
         let info = infer.member(&owner, &name.text)?;
         return Some(Target::Member { info, owner, span: name.span });
     }

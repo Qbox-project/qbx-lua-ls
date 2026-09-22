@@ -4,6 +4,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -18,15 +21,18 @@ jobs:
         with:
           repository: Qbox-project/qbx-lint
           path: qbx-lint
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+      - run: rustup default stable
+      - uses: actions/cache@v4
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: qbx-lua-ls
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo fmt --check
         working-directory: qbx-lua-ls
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
         working-directory: qbx-lua-ls
-      - run: cargo test
+      - run: cargo test --locked
         working-directory: qbx-lua-ls

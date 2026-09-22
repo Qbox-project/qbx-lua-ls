@@ -74,6 +74,8 @@ pub enum EventKind {
 pub struct EventDef {
     pub name: SmolStr,
     pub kind: EventKind,
+    /// The manifest side narrowed by the guard around this registration or trigger.
+    pub side: Option<Side>,
     pub handler: Option<Arc<FunType>>,
     pub range: Range,
 }
@@ -161,6 +163,17 @@ fn remove_file_slots<'a>(
 }
 
 impl Index {
+    /// Start a fresh disk scan without discarding the built-in library.
+    pub fn clear_workspace(&mut self) {
+        let stubs: Vec<FileEntry> =
+            self.files.iter_mut().filter_map(Option::take).filter(|file| file.origin == FileOrigin::Stub).collect();
+        *self = Self::default();
+        for entry in stubs {
+            let id = self.allocate(&entry.path);
+            self.set_file(id, entry);
+        }
+    }
+
     pub fn file_id(&self, path: &Path) -> Option<FileId> {
         self.by_path.get(&normalize_path(path)).copied()
     }

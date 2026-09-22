@@ -1,138 +1,92 @@
 # qbx-lua-ls
 
-A language server for FiveM Lua that stays small. It understands CfxLua 5.4 syntax, reads
-`fxmanifest.lua` to know which globals and natives exist on which side, takes its types from
-LuaCATS annotations, and shares its diagnostics with [`qbx-lint`](../qbx-lint).
+A language server for FiveM Lua. It reads `fxmanifest.lua` to resolve resource imports and
+client/server scripts, uses LuaCATS annotations for editor help, and provides diagnostics from
+[qbx-lint](https://github.com/Qbox-project/qbx-lint).
 
-> Status: proof of concept. It is an alternative to running `lua-language-server` with the cfxlua
-> add-on, not a drop-in clone of it: the type checker is deliberately much simpler.
-
-## Numbers
-
-Same machine (Windows 11), same workspace: qbx_core, qbx_police, qbx_vehicleshop, ox_lib and
-ox_inventory, 224 Lua files.
-
-| | Workspace loaded | Resident memory |
-| --- | --- | --- |
-| lua-language-server 3.19.1 | 4.7 s | 309 MB |
-| lua-language-server 3.19.1 + cfxlua natives library | 6.5 s | 458 MB |
-| qbx-lua-ls | 0.21 s | 12 MB |
-
-Requests against a 2,600 line file (`ox_inventory/modules/inventory/server.lua`): hover,
-completion and definition answer in well under a millisecond, semantic tokens in ~2 ms, document
-symbols in ~7 ms.
-
-Reproduce with:
-
-```bash
-cargo build --release
-node scripts/bench.mjs <workspace> [file-to-open]
-node scripts/bench-luals.mjs <workspace> <path-to-lua-language-server> [library-dir ...]
-```
-
-### Why it is small
-
-- **Closed files keep no syntax tree.** Each file is parsed once and reduced to a summary: global
-  symbols, table members, classes and aliases, exports, events and the module return type. Only
-  open documents keep their AST, and references in closed files are found by re-parsing on demand
-  (the parser handles ~30 MB/s, so that is cheap).
-- **Natives are not Lua files.** The ~9,900 native signatures and their documentation are a
-  sorted table embedded in the binary and binary-searched in place; nothing is parsed or copied
-  at startup.
-- **Types are resolved lazily.** Symbols store references such as "class `Player`", "table
-  `lib.callback`" or "module `config.shared`", which are looked up when a request needs them.
-- **Dependency driven indexing.** Opening one resource indexes only that resource plus the
-  resources its manifest refers to (`@ox_lib/init.lua`, `dependencies { ... }`), found by walking
-  up to the surrounding `resources` folder.
+The server communicates over standard input and output using the Language Server Protocol
+(LSP). Editor integrations and setup instructions live in
+[qbx-editor](https://github.com/Qbox-project/qbx-editor/blob/main/docs/editors.md).
+Available features depend on the editor's LSP client.
 
 ## Features
 
-| | |
-| --- | --- |
-| Completion | locals, side-aware globals and natives, members through classes/tables/modules, `exports.resource:Fn`, event and callback names, `require` paths, expected table fields, LuaCATS tags and types, manifest directives and paths, FiveM snippets |
-| Hover | signatures, LuaCATS docs, native docs with examples and side, event handler locations, and for tables an overview of their fields with types and literal values (`Debug: boolean = true`) |
-| Scoping | a global table only shows what the current file can really see: `Config` means the `Config` of this resource (plus files its manifest imports), never the merged `Config` of every resource in the workspace; library tables such as `lib` are completed from the imported library |
-| Navigation | definition (incl. `require` targets, event registrations, exports, locale keys), references and rename for locals, globals **and fields/methods** (each candidate's owner type is resolved, so `a.name` and `b.name` are not confused), document highlight, document and workspace symbols |
-| Editing help | signature help, inlay parameter hints, folding, semantic tokens, **document formatting** through `qbx_lua_fmt` (options from `[format]` in `qbxlint.toml`, otherwise the editor's indentation) |
-| Project knowledge | `locale('…')` keys with their text from `locales/en.json`, convar names from `GetConvar*` calls and `set`/`setr`/`sets` lines in `.cfg` files, state bag keys after `.state.` and in `AddStateBagChangeHandler` |
-| Diagnostics | every `qbx-lint` rule with manifest context, for the whole workspace (closed files are linted one at a time and dropped again; a save only re-lints the affected resource), quick fixes, "disable for this line" actions |
-| Side awareness | natives and globals filtered by client/server, wrong-side errors, event name completion that follows the call direction (`TriggerServerEvent` only offers events handled on the server), `qbx/fileInfo` for editors |
-| Escrow | encrypted (`FXAP`) files are never parsed; a resource with a `.fxap` marker or an encrypted file is opaque, so nothing is claimed about its globals, locale keys, exports or event handlers. Resources with JavaScript/C# scripts or computed export names are treated the same for exports |
-| Events | signature help and inlay hints of `TriggerServerEvent('name', …)`, `TriggerClientEvent`, `lib.callback` and `lib.callback.await` show the parameters of the handler registered for that name instead of the native's `...: any`, with the handler's location |
-| Runtime types | native handles keep their name (`Vehicle`, `Ped`, `Hash`, …) in signatures and hovers but are integers without members, so they never resolve to a resource's class of the same name; the built-in `glm` library (also through `require 'glm'`) including `glm.polygon` and the other geometry helpers |
-| ox_lib | `lib.onCache('vehicle', function(value, oldValue)` types both parameters as `cache.vehicle`; `onCache` snippet and `lib.onCache('…')` completion whose key list is read from the indexed ox_lib source |
+- Completion and hover for Lua symbols, FiveM natives, exports, events and callbacks.
+- Definitions, references and rename for locals, globals and fields, including static string
+  keys such as `Config['name']` and supported `---@field` declarations.
+- Diagnostics and quick fixes with resource and client/server context.
+- Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
+- Whole-document formatting, configured through `qbxlint.toml`.
+- Completion for manifest paths, locale keys, convars, state bag keys and LuaCATS annotations.
 
-Type sources: `---@class/@field/@alias/@enum/@type/@param/@return/@generic/@overload`, table
-constructors (also behind `setmetatable`), `function Table.name()` / `Table.name = ...` anywhere
-in the resource, `_ENV.name = value`, module returns through `require`/`lib.load`, exports
-registered with `exports('Name', fn)`, native signatures, and callback parameter types taken from
-the function being called.
+Opening a resource also indexes dependencies and imported scripts found in sibling resource
+folders. Add other locations through the `library` setting.
 
-### Known limits
+## Build and run
 
-- No type *checking* (no "cannot assign string to number"); types drive completion, hover and
-  navigation only.
-- No control-flow narrowing, no full generics (only simple `T` substitution), no operator
-  metamethod lookup apart from vectors.
-- Field references are as good as the inferred owner type: a field reached through a value whose
-  type is unknown is not found, and fields declared only by a `---@field` comment are found but
-  the comment itself is not rewritten on rename.
-- Range formatting is not implemented, only whole documents.
+The release workflow produces archives for Windows x64, Linux x64/ARM64 (musl), and macOS
+x64/ARM64. Download a matching archive from [Releases](https://github.com/Qbox-project/qbx-lua-ls/releases)
+when available, or build from source using the steps below.
+
+Install stable Rust and keep these repositories next to each other. The server currently uses
+local path dependencies from `qbx-lint`.
+
+```sh
+git clone https://github.com/Qbox-project/qbx-lint.git
+git clone https://github.com/Qbox-project/qbx-lua-ls.git
+cd qbx-lua-ls
+cargo build --release --locked
+```
+
+The executable is `target/release/qbx-lua-ls`, or `target/release/qbx-lua-ls.exe` on Windows.
+Put it on `PATH`, or configure its absolute path in your editor. Start it without arguments for
+LSP over stdio; `--version` prints the version. It does not need a running FiveM server.
+
+Use a resource folder or the server's `resources` folder as the editor workspace. Follow the
+[editor setup instructions](https://github.com/Qbox-project/qbx-editor/blob/main/docs/editors.md)
+to start the server from your editor.
 
 ## Configuration
 
-Sent as `initializationOptions` and through `workspace/didChangeConfiguration` under `qbxLua`:
+Send this object directly as LSP `initializationOptions`:
 
-```jsonc
+```json
 {
-  "library": ["C:/server/resources"],           // extra folders to index
-  "diagnostics": { "enable": true, "rules": { "unused-argument": "off" } },
+  "library": [],
+  "diagnostics": {
+    "enable": true,
+    "workspace": true,
+    "rules": {}
+  },
   "inlayHints": { "enable": true },
   "semanticTokens": { "enable": true }
 }
 ```
 
-A `qbxlint.toml` in the workspace root is honoured for diagnostics, so the editor shows what CI
-will report.
+For `workspace/didChangeConfiguration`, put the same object in `settings.qbxLua` or directly in
+`settings`. Restart the server after changing `library`. A discovered `qbxlint.toml` supplies
+lint and formatting settings; editor rule overrides take precedence for diagnostics.
 
-`diagnostics.workspace` (default `true`) controls whether files that are not open are reported.
+The server relies on the editor for file-watch notifications. If the client does not send them,
+send a `qbx/reindex` request with `null` parameters or restart after external file or manifest
+changes. Open-document edits continue to update normally.
 
-Custom requests: `qbx/status` (index statistics), `qbx/reindex` and `qbx/fileInfo`
-(`{ uri }` → `{ side: client|server|shared|module|manifest|standalone, resource }`).
+See the [client configuration and request reference](docs/protocol.md) for the full settings
+and custom requests.
 
-## Editors
+## Limits
 
-- VS Code: [`qbx-vscode`](../qbx-vscode).
-- Anything that speaks LSP over stdio, for example Neovim:
+- Types support completion, hover and navigation. The server does not check assignment types
+  or provide full control-flow narrowing or generic inference.
+- Field references depend on the inferred owner type. Computed keys and fields reached through
+  unknown types may not be found; known declarations that cannot be edited safely prevent rename.
+- Formatting applies to whole documents. Range formatting is not implemented.
+- Encrypted scripts cannot be analyzed. Security diagnostics are heuristic checks, not proof
+  that an event handler or resource is secure.
 
-  ```lua
-  vim.lsp.start({ name = 'qbx-lua-ls', cmd = { 'qbx-lua-ls' }, root_dir = vim.fs.root(0, { 'fxmanifest.lua', '.git' }) })
-  ```
-
-## Layout
-
-| Module | Purpose |
-| --- | --- |
-| `types`, `luacats` | type model and LuaCATS annotation parser |
-| `indexer`, `index` | per-file summaries and the workspace index with visibility rules |
-| `infer` | on-demand expression typing for open documents and for the indexer |
-| `workspace` | resource discovery, sides, imports, dependency indexing, lint environment |
-| `features/*` | one module per LSP feature |
-| `server` | stdio main loop; diagnostics are published when the message queue is idle |
-
-The parser, scope resolver, manifest model, natives data and lint rules come from the `qbx-lint`
-workspace through path dependencies; switch them to git dependencies once both are published.
-
-## Development
-
-```bash
-cargo test            # unit tests plus end-to-end LSP tests over an in-memory connection
-node scripts/probe.mjs <workspace> <virtual-file> target/release/qbx-lua-ls < snippet.lua
-```
-
-`probe.mjs` opens a virtual document and prints completions (`--^` at the end of a line) and
-hovers (`--?<column>`), which is handy for checking behaviour against real resources.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and [CHANGELOG.md](CHANGELOG.md)
+for release notes.
 
 ## License
 
-GPL-3.0-or-later
+[GPL-3.0-or-later](LICENSE).

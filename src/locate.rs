@@ -6,24 +6,54 @@ use qbx_lua_syntax::Span;
 pub enum MemberAccess<'a> {
     Field { base: &'a Expr, name: &'a Name },
     Method { base: &'a Expr, name: &'a Name },
+    Index { base: &'a Expr, index: &'a Expr },
 }
 
 impl<'a> MemberAccess<'a> {
     pub fn base(&self) -> &'a Expr {
         match self {
-            MemberAccess::Field { base, .. } | MemberAccess::Method { base, .. } => base,
+            MemberAccess::Field { base, .. } | MemberAccess::Method { base, .. } | MemberAccess::Index { base, .. } => {
+                base
+            }
         }
     }
 
-    pub fn name(&self) -> &'a Name {
+    pub fn name(&self, source: &str) -> Option<Name> {
         match self {
-            MemberAccess::Field { name, .. } | MemberAccess::Method { name, .. } => name,
+            MemberAccess::Field { name, .. } | MemberAccess::Method { name, .. } => Some((*name).clone()),
+            MemberAccess::Index { index, .. } => {
+                Some(Name { text: index.as_string()?.clone(), span: string_content_span(index.span, source)? })
+            }
         }
     }
 
     pub fn is_method(&self) -> bool {
         matches!(self, MemberAccess::Method { .. })
     }
+}
+
+/// The replaceable contents of a string token, retaining its quote style and long-string delimiter.
+pub fn string_content_span(span: Span, source: &str) -> Option<Span> {
+    let raw = span.text(source);
+    let bytes = raw.as_bytes();
+    let first = *bytes.first()?;
+    if matches!(first, b'\'' | b'"') && bytes.len() >= 2 && bytes.last() == Some(&first) {
+        return Some(Span::new(span.start + 1, span.end - 1));
+    }
+    if first != b'[' {
+        return None;
+    }
+    let level = bytes[1..].iter().take_while(|&&b| b == b'=').count();
+    let delimiter_len = level + 2;
+    if bytes.get(delimiter_len - 1) != Some(&b'[')
+        || raw.len() < delimiter_len * 2
+        || !raw.ends_with(&format!("]{}]", "=".repeat(level)))
+    {
+        return None;
+    }
+    let body = &raw[delimiter_len..raw.len() - delimiter_len];
+    let newline_len = if body.starts_with("\r\n") { 2 } else { usize::from(body.starts_with('\n')) };
+    Some(Span::new(span.start + (delimiter_len + newline_len) as u32, span.end - delimiter_len as u32))
 }
 
 pub struct CallSite<'a> {
@@ -98,6 +128,11 @@ impl<'a> Visitor<'a> for Locator<'a> {
         match &expr.kind {
             ExprKind::Field { base, name, .. } if name.span.contains_inclusive(self.offset) => {
                 self.member = Some(MemberAccess::Field { base, name });
+            }
+            ExprKind::Index { base, index, .. }
+                if index.as_string().is_some() && index.span.contains_inclusive(self.offset) =>
+            {
+                self.member = Some(MemberAccess::Index { base, index });
             }
             ExprKind::MethodCall { base, method, args, args_span, .. } => {
                 if method.span.contains_inclusive(self.offset) {

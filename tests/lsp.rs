@@ -12,6 +12,7 @@ struct Client {
     server: Option<JoinHandle<()>>,
     next_id: i32,
     diagnostics: HashMap<String, Value>,
+    registrations: Vec<Value>,
     root: PathBuf,
 }
 
@@ -21,17 +22,33 @@ fn fixture_root() -> PathBuf {
 
 impl Client {
     fn start(root: PathBuf) -> Self {
+        Self::start_with_capabilities(
+            root,
+            json!({
+                "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } },
+                "textDocument": { "completion": { "completionItem": { "snippetSupport": true } } }
+            }),
+        )
+    }
+
+    fn start_with_capabilities(root: PathBuf, capabilities: Value) -> Self {
         let (server_side, client_side) = Connection::memory();
         let server = std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(move || qbx_lua_ls::server::run_connection(server_side).expect("server failed"))
             .unwrap();
-        let mut client =
-            Client { connection: client_side, server: Some(server), next_id: 0, diagnostics: HashMap::new(), root };
+        let mut client = Client {
+            connection: client_side,
+            server: Some(server),
+            next_id: 0,
+            diagnostics: HashMap::new(),
+            registrations: Vec::new(),
+            root,
+        };
         let root_uri = Url::from_file_path(&client.root).unwrap();
         let result = client.request(
             "initialize",
-            json!({ "processId": null, "rootUri": root_uri, "capabilities": {}, "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }] }),
+            json!({ "processId": null, "rootUri": root_uri, "capabilities": capabilities, "workspaceFolders": [{ "uri": root_uri, "name": "fixture" }] }),
         );
         assert!(result["capabilities"]["completionProvider"].is_object());
         client.notify("initialized", json!({}));
@@ -53,6 +70,9 @@ impl Client {
                 self.diagnostics.insert(uri, n.params["diagnostics"].clone());
             }
             Message::Request(request) => {
+                if request.method == "client/registerCapability" {
+                    self.registrations.extend(request.params["registrations"].as_array().unwrap().iter().cloned());
+                }
                 let reply = lsp_server::Response { id: request.id, result: Some(Value::Null), error: None };
                 self.connection.sender.send(Message::Response(reply)).unwrap();
             }
@@ -583,6 +603,138 @@ fn finds_and_renames_fields_across_files() {
     assert!(prepared.is_object(), "exports defined in the workspace can be renamed: {prepared}");
 }
 
+fn renamed_text(client: &mut Client, relative: &str, text: &str, needle: &str, delta: u32) -> String {
+    let (line, column) = pos(text, needle, delta);
+    let params = client.position_params(relative, line, column);
+    let prepared = client.request("textDocument/prepareRename", params.clone());
+    assert!(prepared.is_object(), "rename should be available on {needle}: {prepared}");
+    let mut params = params;
+    params["newName"] = json!("renamed");
+    let result = client.request("textDocument/rename", params);
+    let edit: lsp_types::WorkspaceEdit = serde_json::from_value(result.clone()).expect("rename edit");
+    let changes = edit.changes.unwrap();
+    assert_eq!(changes.len(), 1, "unrelated objects must not be renamed: {result}");
+    let mut edits = changes[&client.uri(relative)].clone();
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
+    let lines = qbx_lua_syntax::LineIndex::new(text);
+    let mut output = text.to_string();
+    let mut previous_start = text.len() as u32;
+    for edit in edits {
+        let start = lines.offset_utf16(
+            text,
+            qbx_lua_syntax::LineCol { line: edit.range.start.line, col: edit.range.start.character },
+        );
+        let end = lines
+            .offset_utf16(text, qbx_lua_syntax::LineCol { line: edit.range.end.line, col: edit.range.end.character });
+        assert!(end <= previous_start, "rename edits must not overlap: {result}");
+        previous_start = start;
+        output.replace_range(start as usize..end as usize, &edit.new_text);
+    }
+    assert!(qbx_lua_syntax::parse(&output).errors.is_empty(), "renamed Lua must parse: {output}");
+    output
+}
+
+#[test]
+fn rename_static_string_reads_and_writes_preserves_delimiters() {
+    let mut client = Client::start(fixture_root());
+    let text = "Audit = { foo = 1 }\nAudit['foo'] = 2\nprint(Audit.foo, Audit[\"foo\"], Audit[ [=[foo]=] ], Audit['f\\111o'])\nOther = { foo = 3 }\nprint(Other['foo'])\n";
+    client.open_with(SHOP_CLIENT, text);
+    let expected = "Audit = { renamed = 1 }\nAudit['renamed'] = 2\nprint(Audit.renamed, Audit[\"renamed\"], Audit[ [=[renamed]=] ], Audit['renamed'])\nOther = { foo = 3 }\nprint(Other['foo'])\n";
+    assert_eq!(renamed_text(&mut client, SHOP_CLIENT, text, "Audit.foo", 7), expected);
+    assert_eq!(renamed_text(&mut client, SHOP_CLIENT, text, "Audit['foo']", 8), expected);
+    let (line, column) = pos(text, "Audit['foo']", 8);
+    let mut params = client.position_params(SHOP_CLIENT, line, column);
+    params["context"] = json!({ "includeDeclaration": true });
+    let refs = client.request("textDocument/references", params);
+    assert_eq!(refs.as_array().unwrap().len(), 6, "{refs}");
+    let highlights =
+        client.request("textDocument/documentHighlight", client.position_params(SHOP_CLIENT, line, column));
+    assert_eq!(highlights.as_array().unwrap().len(), 6, "{highlights}");
+}
+
+#[test]
+fn rename_static_string_declarations_and_nested_paths() {
+    let mut client = Client::start(fixture_root());
+    let cases = [
+        ("Audit = { ['foo'] = 1 }\nprint(Audit.foo, Audit['foo'])\n",
+         "['foo']", 3,
+         "Audit = { ['renamed'] = 1 }\nprint(Audit.renamed, Audit['renamed'])\n"),
+        ("Audit = {}\nAudit['foo'] = 1\nprint(Audit.foo, Audit['foo'])\n",
+         "Audit.foo", 7,
+         "Audit = {}\nAudit['renamed'] = 1\nprint(Audit.renamed, Audit['renamed'])\n"),
+        ("Audit = { ['nested'] = { [ [=[\nfoo]=] ] = 1 } }\nprint(Audit['nested'].foo, Audit.nested['foo'])\n",
+         ".foo", 2,
+         "Audit = { ['nested'] = { [ [=[\nrenamed]=] ] = 1 } }\nprint(Audit['nested'].renamed, Audit.nested['renamed'])\n"),
+    ];
+    for (version, (text, needle, delta, expected)) in (1..).zip(cases) {
+        if version == 1 {
+            client.open_with(SHOP_CLIENT, text);
+        } else {
+            client.change(SHOP_CLIENT, version, text);
+        }
+        assert_eq!(renamed_text(&mut client, SHOP_CLIENT, text, needle, delta), expected);
+    }
+}
+
+#[test]
+fn rename_annotation_fields_updates_declarations_and_typed_constructors() {
+    let mut client = Client::start(fixture_root());
+    let text = "---@class RenameOptions\n---@field private foo? number foo description\nlocal audit = { ['foo'] = 1 }\n---@type RenameOptions\nlocal other = { foo = 2 }\nprint(audit.foo, other['foo'])\n";
+    client.open_with(SHOP_CLIENT, text);
+    let expected = "---@class RenameOptions\n---@field private renamed? number foo description\nlocal audit = { ['renamed'] = 1 }\n---@type RenameOptions\nlocal other = { renamed = 2 }\nprint(audit.renamed, other['renamed'])\n";
+    assert_eq!(renamed_text(&mut client, SHOP_CLIENT, text, "audit.foo", 7), expected);
+    assert_eq!(renamed_text(&mut client, SHOP_CLIENT, text, "private foo", 9), expected);
+
+    let text = "---@class RenameOptions\n---@field ['foo'] number foo description\nlocal audit = { foo = 1 }\nprint(audit['foo'])\n";
+    client.change(SHOP_CLIENT, 2, text);
+    let expected = "---@class RenameOptions\n---@field ['renamed'] number foo description\nlocal audit = { renamed = 1 }\nprint(audit['renamed'])\n";
+    assert_eq!(renamed_text(&mut client, SHOP_CLIENT, text, "audit['foo']", 8), expected);
+}
+
+#[test]
+fn rename_finds_escaped_keys_in_closed_files_and_aborts_if_a_file_is_unreadable() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-rename-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    std::fs::create_dir(&fixture.0).unwrap();
+    std::fs::write(
+        fixture.0.join("fxmanifest.lua"),
+        "fx_version 'cerulean'\ngame 'gta5'\nshared_scripts { 'main.lua', 'closed.lua' }\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.0.join("main.lua"), "Audit = { foo = 1 }\nprint(Audit.foo)\n").unwrap();
+    std::fs::write(fixture.0.join("closed.lua"), "print(Audit['\\102\\111\\111'])\n").unwrap();
+    let mut client = Client::start(fixture.0.clone());
+    let text = client.open("main.lua");
+    let (line, column) = pos(&text, "Audit.foo", 7);
+    let mut params = client.position_params("main.lua", line, column);
+    params["newName"] = json!("renamed");
+    let result = client.request("textDocument/rename", params.clone());
+    let changes = result["changes"].as_object().expect("rename edit");
+    assert_eq!(changes.len(), 2, "escaped references in closed files must be found: {result}");
+    let edits = changes[client.uri("closed.lua").as_str()].as_array().unwrap();
+    assert_eq!(edits.len(), 1, "{result}");
+    assert_eq!(edits[0]["range"], json!({"start": {"line": 0, "character": 13}, "end": {"line": 0, "character": 25}}));
+    std::fs::remove_file(fixture.0.join("closed.lua")).unwrap();
+    assert_eq!(
+        client.request("textDocument/rename", params),
+        Value::Null,
+        "an unreadable indexed file must not result in partial edits"
+    );
+}
+
 #[test]
 fn formats_documents() {
     let mut client = Client::start(fixture_root());
@@ -652,6 +804,69 @@ fn snippets_outrank_the_plain_name() {
 
     let member = first_item("lib.onCa");
     assert!(member["insertText"].as_str().unwrap_or_default().starts_with("onCache('${1|"), "{member}");
+}
+
+#[test]
+fn minimal_clients_receive_plain_completions_and_no_dynamic_watch_registration() {
+    for capabilities in [
+        json!({}),
+        json!({
+            "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": false } },
+            "textDocument": { "completion": { "completionItem": { "snippetSupport": false } } }
+        }),
+    ] {
+        let mut client = Client::start_with_capabilities(fixture_root(), capabilities);
+        client.request("qbx/status", Value::Null);
+        assert!(client.registrations.is_empty(), "{:?}", client.registrations);
+
+        let cases = [
+            (CLIENT, "CreateThread", 0, 12, Some("CreateThread")),
+            (CLIENT, "local Useful = 1\nUse", 1, 3, Some("Useful")),
+            (CLIENT, "lib.onCa", 0, 8, None),
+            (CLIENT, "oncache", 0, 7, None),
+            (CLIENT, "---@par", 0, 7, Some("param")),
+            ("myresource/fxmanifest.lua", "fx_v", 0, 4, Some("fx_version")),
+        ];
+        for (relative, text, line, column, expected) in cases {
+            client.open_with(relative, text);
+            let result = client.request("textDocument/completion", client.position_params(relative, line, column));
+            let items = result["items"].as_array().unwrap();
+            if let Some(label) = expected {
+                assert!(items.iter().any(|item| item["label"] == label), "{result}");
+            }
+            for item in items {
+                assert_ne!(item["insertTextFormat"], 2, "{item}");
+                assert_ne!(item["labelDetails"]["description"], "snippet", "{item}");
+                assert!(!item["insertText"].as_str().unwrap_or_default().contains('$'), "{item}");
+            }
+            if text == "---@par" {
+                assert_eq!(items.iter().find(|item| item["label"] == "param").unwrap()["insertText"], "param");
+            }
+            client.notify("textDocument/didClose", json!({"textDocument": {"uri": client.uri(relative)}}));
+        }
+    }
+}
+
+#[test]
+fn capable_clients_keep_file_watches_and_annotation_and_manifest_snippets() {
+    let mut client = Client::start(fixture_root());
+    client.request("qbx/status", Value::Null);
+    assert_eq!(client.registrations.len(), 1);
+    let registration = &client.registrations[0];
+    assert_eq!(registration["method"], "workspace/didChangeWatchedFiles");
+    assert!(registration["registerOptions"]["watchers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|watch| watch["globPattern"] == "**/*.lua"));
+
+    for (relative, text, label) in [(CLIENT, "---@par", "param"), ("myresource/fxmanifest.lua", "fx_v", "fx_version")] {
+        client.open_with(relative, text);
+        let result = client.request("textDocument/completion", client.position_params(relative, 0, text.len() as u32));
+        let item = result["items"].as_array().unwrap().iter().find(|item| item["label"] == label).unwrap();
+        assert_eq!(item["insertTextFormat"], 2, "{item}");
+        assert!(item["insertText"].as_str().unwrap().contains("${1"), "{item}");
+    }
 }
 
 #[test]

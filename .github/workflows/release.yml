@@ -1,0 +1,69 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, archive: tar.gz }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, archive: tar.gz }
+          - { os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, archive: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qbx-lua-ls
+      - uses: actions/checkout@v4
+        with:
+          repository: Qbox-project/qbx-lint
+          ref: ${{ github.ref_name }}
+          path: qbx-lint
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - run: rustup default stable
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+        working-directory: qbx-lua-ls
+      - name: Check version and package
+        shell: bash
+        working-directory: qbx-lua-ls
+        run: |
+          set -euo pipefail
+          cd target/${{ matrix.target }}/release
+          binary="qbx-lua-ls"
+          if [ "${{ runner.os }}" = "Windows" ]; then binary="${binary}.exe"; fi
+          actual="$(./"${binary}" --version)"
+          expected="qbx-lua-ls ${GITHUB_REF_NAME#v}"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match built version: ${actual}" >&2
+            exit 1
+          fi
+          cp ../../../LICENSE LICENSE
+          name="qbx-lua-ls-${{ matrix.target }}"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "../../../${name}.zip" "${binary}" LICENSE
+          else
+            tar -czf "../../../${name}.tar.gz" "${binary}" LICENSE
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: qbx-lua-ls/qbx-lua-ls-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    uses: Qbox-project/.github/.github/workflows/release-artifacts.yml@main
+    with:
+      artifact-pattern: binary-*
+    secrets: inherit
