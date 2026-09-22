@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- Update the shared parser and analysis crates to version 1.0.1.
+
 ## 1.0.0
 
 - Add FiveM Lua language support over stdio LSP: completion, hover, definitions, references,
