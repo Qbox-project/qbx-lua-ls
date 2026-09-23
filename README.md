@@ -84,8 +84,8 @@ and custom requests.
 - Encrypted scripts cannot be analyzed. Security diagnostics are heuristic checks, not proof
   that an event handler or resource is secure.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and [CHANGELOG.md](CHANGELOG.md)
-for release notes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and the
+[releases page](https://github.com/Qbox-project/qbx-lua-ls/releases) for release notes.
 
 ## License
 

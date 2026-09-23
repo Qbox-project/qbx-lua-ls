@@ -67,5 +67,5 @@ settings, expected behavior and a small Lua/manifest example. For crashes, inclu
 and the last action that triggered the problem.
 
 Describe the behavior changed by a pull request and list the checks you ran. State any editor
-or platform behavior you could not test. Update the docs and changelog when the user-facing
-behavior changes.
+or platform behavior you could not test. Update the docs when the user-facing
+behavior changes. Release notes are generated from commit messages, so write them as [Conventional Commits](https://www.conventionalcommits.org).
