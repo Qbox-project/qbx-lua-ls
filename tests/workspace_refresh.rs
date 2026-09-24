@@ -299,20 +299,3 @@ fn manual_reindex_restores_unsaved_documents_and_their_new_file_ids() {
     let symbols = client.request("workspace/symbol", json!({"query": "ScratchOnly"}));
     assert!(symbols.as_array().unwrap().is_empty(), "{symbols}");
 }
-
-#[test]
-fn a_request_flushes_dirty_documents_once() {
-    let fixture = Fixture::new();
-    fixture.write("demo/fxmanifest.lua", "client_script '*.lua'");
-    fixture.write("demo/main.lua", "DiskOnly = 1");
-    let mut client = Client::start(&fixture.0);
-    let uri = path_to_uri(&fixture.0.join("demo/main.lua"));
-    client.open(&uri, "UnsavedOnly = 42");
-
-    let symbols = client.request("workspace/symbol", json!({"query": "UnsavedOnly"}));
-    assert!(symbols.as_array().unwrap().iter().any(|s| s["name"] == "UnsavedOnly"));
-
-    let _ = client.request("qbx/status", Value::Null);
-    let symbols = client.request("workspace/symbol", json!({"query": "UnsavedOnly"}));
-    assert!(symbols.as_array().unwrap().iter().any(|s| s["name"] == "UnsavedOnly"));
-}

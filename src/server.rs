@@ -78,6 +78,7 @@ pub struct Server {
     snippet_support: bool,
     watched_files_registration: bool,
     dirty: FxHashSet<Url>,
+    diagnostics_pending: bool,
     /// Closed files that currently have diagnostics published, so they can be cleared again.
     workspace_reported: FxHashSet<Url>,
     workspace_stale: bool,
@@ -191,6 +192,7 @@ impl Server {
             snippet_support,
             watched_files_registration,
             dirty: FxHashSet::default(),
+            diagnostics_pending: false,
             workspace_reported: FxHashSet::default(),
             workspace_stale: true,
             stale_resources: FxHashSet::default(),
@@ -276,6 +278,7 @@ impl Server {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(self)));
         if outcome.is_err() {
             self.dirty.clear();
+            self.diagnostics_pending = false;
             self.log("recovered from an internal error; please report it with the file that triggered it".to_string());
         }
         outcome.ok()
@@ -283,7 +286,8 @@ impl Server {
 
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
     fn flush_index(&mut self) {
-        for uri in &self.dirty {
+        self.diagnostics_pending |= !self.dirty.is_empty();
+        for uri in std::mem::take(&mut self.dirty) {
             if let Some(doc) = self.docs.get_mut(&uri) {
                 // A full scan reallocates file IDs, including the reserved slots for manifests.
                 doc.file = self.ws.index.allocate(&doc.path);
@@ -297,11 +301,10 @@ impl Server {
     }
 
     fn publish_dirty(&mut self) {
-        if self.dirty.is_empty() {
+        self.flush_index();
+        if !std::mem::take(&mut self.diagnostics_pending) {
             return;
         }
-        self.flush_index();
-        self.dirty.clear();
         let crossrefs = self.ws.crossrefs();
         let uris: Vec<Url> = self.docs.keys().cloned().collect();
         for uri in uris {
@@ -671,6 +674,7 @@ impl Server {
                 // rebuilt index. A second pass settles types shared between open documents.
                 self.flush_index();
                 self.ws.link_imports();
+                self.dirty.extend(self.docs.keys().cloned());
                 self.flush_index();
                 self.stale_resources.clear();
                 self.workspace_stale = true;
@@ -703,5 +707,31 @@ impl Server {
             }
             other => Err(format!("unsupported request: {other}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_index_edits_once_and_idle_time_still_publishes_them() {
+        let (connection, client) = Connection::memory();
+        let mut server = Server::new(connection, InitializeParams::default());
+        let uri = Url::from_file_path(std::env::temp_dir().join("qbx-lua-ls-dirty.lua")).unwrap();
+        let text_document = TextDocumentItem::new(uri, "lua".into(), 1, "Value = 1".into());
+        server.handle_notification(Notification::new(
+            notif::DidOpenTextDocument::METHOD.into(),
+            DidOpenTextDocumentParams { text_document },
+        ));
+        server.flush_index();
+        assert!(server.dirty.is_empty());
+        server.publish_dirty();
+        let published = client
+            .receiver
+            .try_iter()
+            .filter(|m| matches!(m, Message::Notification(n) if n.method == notif::PublishDiagnostics::METHOD))
+            .count();
+        assert_eq!(published, 1);
     }
 }
