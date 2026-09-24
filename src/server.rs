@@ -283,8 +283,9 @@ impl Server {
 
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
     fn flush_index(&mut self) {
-        for uri in &self.dirty {
-            if let Some(doc) = self.docs.get_mut(uri) {
+        let dirty: Vec<Url> = self.dirty.iter().cloned().collect();
+        for uri in dirty {
+            if let Some(doc) = self.docs.get_mut(&uri) {
                 // A full scan reallocates file IDs, including the reserved slots for manifests.
                 doc.file = self.ws.index.allocate(&doc.path);
                 let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
@@ -293,6 +294,7 @@ impl Server {
                         self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
                 }
             }
+            self.dirty.remove(&uri);
         }
     }
 
@@ -301,7 +303,6 @@ impl Server {
             return;
         }
         self.flush_index();
-        self.dirty.clear();
         let crossrefs = self.ws.crossrefs();
         let uris: Vec<Url> = self.docs.keys().cloned().collect();
         for uri in uris {
