@@ -817,6 +817,64 @@ fn formats_documents() {
 }
 
 #[test]
+fn lua_ls_config_supplies_lint_settings_but_not_formatting() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-luarc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    std::fs::create_dir(&fixture.0).unwrap();
+    std::fs::write(fixture.0.join("fxmanifest.lua"), "fx_version 'cerulean'\ngame 'gta5'\nclient_script 'main.lua'\n")
+        .unwrap();
+    std::fs::write(
+        fixture.0.join(".luarc.json"),
+        r#"{ "diagnostics.globals": ["lib"], "diagnostics.disable": ["lowercase-global"] }"#,
+    )
+    .unwrap();
+    let text = "helper = function() return lib end\nif helper   then\nprint( helper )\nend\n";
+    std::fs::write(fixture.0.join("main.lua"), text).unwrap();
+    let mut client = Client::start(fixture.0.clone());
+    client.open_with("main.lua", text);
+    assert_eq!(client.diagnostics_for("main.lua"), []);
+
+    let params =
+        json!({ "textDocument": { "uri": client.uri("main.lua") }, "options": { "tabSize": 2, "insertSpaces": true } });
+    let edits = client.request("textDocument/formatting", params);
+    assert_eq!(
+        edits[0]["newText"], "helper = function() return lib end\nif helper then\n  print(helper)\nend\n",
+        "the editor's indentation applies without a qbxlint.toml"
+    );
+
+    let watchers: Vec<&str> = client
+        .registrations
+        .iter()
+        .flat_map(|r| r["registerOptions"]["watchers"].as_array().into_iter().flatten())
+        .filter_map(|w| w["globPattern"].as_str())
+        .collect();
+    assert!(watchers.contains(&"**/.luarc.json") && watchers.contains(&"**/.emmyrc.json"), "{watchers:?}");
+    std::fs::write(fixture.0.join(".luarc.json"), r#"{ "diagnostics.globals": ["lib"] }"#).unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": client.uri(".luarc.json"), "type": 2 }] }),
+    );
+    assert_eq!(
+        client.diagnostics_for("main.lua"),
+        [("lowercase-global".to_string(), 0)],
+        "a changed .luarc.json applies"
+    );
+}
+
+#[test]
 fn server_cfg_start_order_settles_dependencies() {
     let mut client = Client::start(fixture_root());
     let late = client.diagnostics_for("late/server.lua");
