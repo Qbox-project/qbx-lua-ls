@@ -282,9 +282,9 @@ impl Server {
     }
 
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
-    fn flush_index(&mut self) -> Vec<Url> {
+    fn flush_index(&mut self) {
         let dirty: Vec<Url> = self.dirty.iter().cloned().collect();
-        for uri in dirty {
+        for uri in &dirty {
             if let Some(doc) = self.docs.get_mut(&uri) {
                 // A full scan reallocates file IDs, including the reserved slots for manifests.
                 doc.file = self.ws.index.allocate(&doc.path);
@@ -294,29 +294,19 @@ impl Server {
                         self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
                 }
             }
-            self.dirty.remove(&uri);
+            self.dirty.remove(uri);
         }
-        dirty
     }
 
     fn publish_dirty(&mut self) {
         if self.dirty.is_empty() {
             return;
         }
-        let uris = self.flush_index();
+        self.flush_index();
         let crossrefs = self.ws.crossrefs();
-        let resources: FxHashSet<_> = uris
-            .iter()
-            .filter_map(|uri| self.docs.get(uri))
-            .filter_map(|doc| self.ws.index.file(doc.file).and_then(|file| file.resource))
-            .collect();
-        for uri in self.docs.keys().filter(|uri| {
-            uris.contains(uri)
-                || self.docs.get(*uri).is_some_and(|doc| {
-                    self.ws.index.file(doc.file).and_then(|file| file.resource).is_some_and(|r| resources.contains(&r))
-                })
-        }) {
-            self.publish(uri, &crossrefs);
+        let uris: Vec<Url> = self.docs.keys().cloned().collect();
+        for uri in uris {
+            self.publish(&uri, &crossrefs);
         }
     }
 
