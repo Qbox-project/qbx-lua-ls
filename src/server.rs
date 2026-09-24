@@ -162,6 +162,10 @@ fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
     roots
 }
 
+fn is_lua_ls_config(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| qbx_lua_analysis::lua_ls_config::FILE_NAMES.iter().any(|n| name == *n))
+}
+
 impl Server {
     pub fn new(connection: Connection, params: InitializeParams) -> Self {
         let settings: Settings =
@@ -225,9 +229,15 @@ impl Server {
         if !self.watched_files_registration {
             return;
         }
-        let watchers = ["**/*.lua", "**/qbxlint.toml", "**/.qbxlint.toml", "**/locales/*.json", "**/*.cfg"]
+        let config_files = qbx_lua_analysis::config::CONFIG_FILE_NAMES
             .iter()
-            .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob.to_string()), kind: None })
+            .chain(qbx_lua_analysis::lua_ls_config::FILE_NAMES)
+            .map(|name| format!("**/{name}"));
+        let watchers = ["**/*.lua", "**/locales/*.json", "**/*.cfg"]
+            .iter()
+            .map(|glob| glob.to_string())
+            .chain(config_files)
+            .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob), kind: None })
             .collect();
         let registration = Registration {
             id: "qbx-watch-lua".into(),
@@ -516,7 +526,7 @@ impl Server {
             let Some(path) = uri_to_path(&change.uri) else { continue };
             if path.extension().is_some_and(|e| e == "cfg") {
                 qbx_lua_analysis::startup::clear_cache();
-            } else if path.extension().is_some_and(|e| e == "toml") {
+            } else if path.extension().is_some_and(|e| e == "toml") || is_lua_ls_config(&path) {
                 if let Some(root) = self.ws.roots.first() {
                     self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
                 }
@@ -641,7 +651,7 @@ impl Server {
                 let doc = self.doc(&p.text_document.uri)?;
                 let mut options = self.ws.lint_config.format.clone();
                 // Without a qbxlint.toml the editor's own indentation settings decide.
-                if self.ws.lint_config.root.as_os_str().is_empty() {
+                if !self.ws.lint_config.format_configured {
                     options.indent_width = p.options.tab_size.max(1) as usize;
                     options.use_tabs = !p.options.insert_spaces;
                 }
