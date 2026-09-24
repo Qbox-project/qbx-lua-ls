@@ -282,7 +282,7 @@ impl Server {
     }
 
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
-    fn flush_index(&mut self) {
+    fn flush_index(&mut self) -> Vec<Url> {
         let dirty: Vec<Url> = self.dirty.iter().cloned().collect();
         for uri in dirty {
             if let Some(doc) = self.docs.get_mut(&uri) {
@@ -296,17 +296,27 @@ impl Server {
             }
             self.dirty.remove(&uri);
         }
+        dirty
     }
 
     fn publish_dirty(&mut self) {
         if self.dirty.is_empty() {
             return;
         }
-        self.flush_index();
+        let uris = self.flush_index();
         let crossrefs = self.ws.crossrefs();
-        let uris: Vec<Url> = self.docs.keys().cloned().collect();
-        for uri in uris {
-            self.publish(&uri, &crossrefs);
+        let resources: FxHashSet<_> = uris
+            .iter()
+            .filter_map(|uri| self.docs.get(uri))
+            .filter_map(|doc| self.ws.index.file(doc.file).and_then(|file| file.resource))
+            .collect();
+        for uri in self.docs.keys().filter(|uri| {
+            uris.contains(uri)
+                || self.docs.get(*uri).is_some_and(|doc| {
+                    self.ws.index.file(doc.file).and_then(|file| file.resource).is_some_and(|r| resources.contains(&r))
+                })
+        }) {
+            self.publish(uri, &crossrefs);
         }
     }
 
