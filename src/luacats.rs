@@ -84,11 +84,16 @@ impl DocGroup {
             let ty = self.params.iter().find(|p| p.name == "...").map_or(Type::Any, |p| p.ty.clone());
             params.push(Param { name: "...".into(), ty, optional: false });
         }
-        // An overload shares the `@generic` names of its doc comment and is called the same way.
+        // An overload shares the `@generic` names of its doc comment and is called the same way,
+        // unless it lists `self` itself like a `fun(self, ...)` field.
         let overloads = self
             .overloads
             .iter()
-            .map(|overload| Arc::new(FunType { is_method, generics: self.generics.clone(), ..(**overload).clone() }))
+            .map(|overload| {
+                let lists_self = overload.params.first().is_some_and(|p| p.name == "self");
+                let is_method = is_method && !lists_self;
+                Arc::new(FunType { is_method, generics: self.generics.clone(), ..(**overload).clone() })
+            })
             .collect();
         FunType {
             params,

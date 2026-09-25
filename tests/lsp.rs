@@ -422,12 +422,30 @@ local function lookup(id, cb) end
 ---@param cb fun(found: integer)
 local function search(id, cb) end
 
+---@class OverloadedShop
+local OverloadedShop = {}
+
+---@overload fun(self: OverloadedShop, label: string): string
+---@param id integer
+---@return integer
+function OverloadedShop:price(id) end
+
+---@overload fun(label: string): string
+---@param id integer
+---@return integer
+function OverloadedShop:stock(id) end
+
 local byId = find(1)
 local byName = find('x')
 local none = arity()
 lookup('x', function(named) end)
 lookup(1, function(numbered) end)
 search(nil, function(byNil) end)
+local priceByLabel = OverloadedShop:price('bread')
+local priceById = OverloadedShop:price(1)
+local stockByLabel = OverloadedShop:stock('bread')
+local stockViaDot = OverloadedShop.stock(OverloadedShop, 'bread')
+local priceViaDot = OverloadedShop.price(OverloadedShop, 'bread')
 ";
     client.open_with(CLIENT, text);
     let cases = [
@@ -438,6 +456,11 @@ search(nil, function(byNil) end)
         ("numbered", "numbered: integer"),
         // `nil` fills the optional `id`, so the declared signature still fits.
         ("byNil", "byNil: integer"),
+        ("priceByLabel", "priceByLabel: string"),
+        ("priceById", "priceById: integer"),
+        ("stockByLabel", "stockByLabel: string"),
+        ("stockViaDot", "stockViaDot: string"),
+        ("priceViaDot", "priceViaDot: string"),
     ];
     for (needle, expected) in cases {
         let (l, c) = pos(text, needle, 0);
