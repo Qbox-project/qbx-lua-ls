@@ -239,6 +239,219 @@ fn hover_shows_types_docs_and_natives() {
 }
 
 #[test]
+fn hover_keeps_literal_types_of_inline_loop_tables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+for _, sex in pairs({ 'male', 'female' }) do end
+for i, n in ipairs({ 1, 2, extra = 'x' }) do end
+for key, value in pairs({ a = true, [3] = 'c' }) do end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("sex", "sex: \"male\"|\"female\""),
+        ("i,", "i: integer"),
+        ("n in", "n: 1|2"),
+        ("key", "key: \"a\"|3"),
+        ("value", "value: true|\"c\""),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn hover_indexes_fields_with_literal_typed_keys() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@type ['male', 'female']
+local sexes = { 'male', 'female' }
+
+---@param metadata { male: table, female: table, age: integer }
+---@param field 'male'|'age'
+---@param kind GarageKind
+local function send(metadata, field, kind)
+    for _, sex in pairs({ 'male', 'female' }) do
+        local sexData = metadata[sex]
+    end
+    for _, listed in pairs(sexes) do
+        local listedData = metadata[listed]
+    end
+    local either = metadata[field]
+    local missing = metadata[kind]
+end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("sexData", "sexData: table"),
+        ("listed in", "listed: \"male\"|\"female\""),
+        ("listedData", "listedData: table"),
+        ("either", "either: table|integer"),
+        ("missing", "missing: unknown"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn hover_infers_loop_variables_of_top_level_tables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local list = { 'male', 'female' }
+local mixed = { 'a', count = 1, [10] = true }
+local garages = { legion = { label = 'Legion' }, pillbox = { label = 'Pillbox' } }
+local first = list[1]
+for _, item in pairs(list) do end
+for k, v in pairs(mixed) do end
+for i, element in ipairs(mixed) do end
+for name, garage in pairs(garages) do end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("list", "local list: string[]"),
+        ("first", "first: string"),
+        ("item", "item: string"),
+        ("k, v", "k: string|integer"),
+        ("v in", "v: integer|string|boolean"),
+        ("element", "element: string"),
+        ("name,", "name: string"),
+        ("garage in", "label: string"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn hover_infers_loops_over_classes_unions_next_and_mixed_tables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@param payload Garage
+---@param both string[]|table<string, integer>
+---@param t table<string, boolean>
+local function f(payload, both, t)
+    for k1, v1 in pairs(payload) do end
+    for k2, v2 in pairs(both) do end
+    for k3, v3 in next, t do end
+    local mixed = { 'a', x = 1 }
+    for k4, v4 in pairs(mixed) do end
+    local keyed = { [1] = 'a', [2] = 5 }
+    local fromKeyed = keyed[1]
+end
+";
+    client.open_with(CLIENT, text);
+    let cases: &[(&str, &[&str])] = &[
+        ("k1", &["k1: string"]),
+        ("v1", &["coords: vector3", "type GarageKind ="]),
+        ("k2", &["k2: integer|string"]),
+        ("v2", &["v2: string|integer"]),
+        ("k3", &["k3: string"]),
+        ("v3", &["v3: boolean"]),
+        ("k4", &["k4: string|integer"]),
+        ("v4", &["v4: integer|string"]),
+        ("fromKeyed", &["fromKeyed: string|integer"]),
+    ];
+    for &(needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        for part in expected {
+            assert!(hover.contains(part), "{needle}: expected {part:?} in {hover}");
+        }
+    }
+}
+
+#[test]
+fn hover_binds_generics_from_arguments_and_callbacks() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@generic K, V, RK, RV
+---@param tbl table<K, V>
+---@param fun fun(value: V, key: K): RV, RK
+---@return table<RK, RV>
+function table.mapEntries(tbl, fun)
+    local result = {}
+    for key, value in pairs(tbl) do
+        local newValue, newKey = fun(value, key)
+        result[newKey or key] = newValue
+    end
+    return result
+end
+
+local function normalize(step)
+    return step / 10
+end
+
+---@param steps { [number]: number }
+local function send(steps)
+    local mapped = table.mapEntries(steps, function(step, featureId)
+        return normalize(step), tostring(featureId)
+    end)
+    local fromList = table.mapEntries({ 'a', 'b' }, function(letter, position)
+        return position, letter
+    end)
+    local unbound = table.mapEntries(steps, function() end)
+end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("mapped", "mapped: table<string, number>"),
+        ("step, f", "step: number"),
+        ("featureId", "featureId: number"),
+        ("fromList", "fromList: table<string, integer>"),
+        ("letter,", "letter: string"),
+        ("position)", "position: integer"),
+        ("unbound", "unbound: table<unknown, unknown>"),
+        // Inside the generic function its parameters stay generic.
+        ("key, value", "key: K"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn hover_expands_aliases_and_lists_members_only_for_tables() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@alias Test.Name string
+---@param kind GarageKind
+---@param name Test.Name
+---@param garage Garage|string
+---@param kinds GarageKind[]
+---@param owned Garage
+local function describe(kind, name, garage, kinds, owned)
+    for _, each in ipairs(kinds) do end
+    print(owned.kind)
+end
+";
+    client.open_with(CLIENT, text);
+    let garage_kind = "type GarageKind = \"public\"|\"job\"|\"gang\"";
+    let cases: &[(&str, u32, &[&str])] = &[
+        ("(kind", 1, &["kind: GarageKind", garage_kind]),
+        ("name, garage", 0, &["name: Test.Name", "type Test.Name = string"]),
+        ("garage, kinds", 0, &["point: GaragePoint"]),
+        ("each", 0, &["each: GarageKind", garage_kind]),
+        ("owned.kind", 6, &["Garage.kind: GarageKind", garage_kind]),
+    ];
+    for &(needle, delta, expected) in cases {
+        let (l, c) = pos(text, needle, delta);
+        let hover = client.hover_text(CLIENT, l, c);
+        for part in expected {
+            assert!(hover.contains(part), "{needle}: expected {part:?} in {hover}");
+        }
+        assert!(!hover.contains("byte"), "{needle}: lists the string library in {hover}");
+    }
+}
+
+#[test]
 fn hover_shows_annotation_type_details_and_ranges() {
     let mut client = Client::start(fixture_root());
     let declarations = "\

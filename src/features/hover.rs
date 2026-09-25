@@ -81,25 +81,24 @@ pub fn target_at(infer: &Infer, doc: &Document, offset: u32) -> Option<Target> {
 const MAX_OVERVIEW_FIELDS: usize = 14;
 
 /// `name: type`, a function signature, or for tables an overview of the fields that are in scope
-/// for this file, with the literal values the index remembered.
+/// for this file, with the literal values the index remembered. Aliases follow on their own lines.
 fn describe_value(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> String {
     if let (Some(fun), Type::Fun(_)) = (ty.as_fun(), ty) {
         return format!("{prefix}{}", fun.signature(name));
     }
+    let mut out = value_overview(infer, prefix, name, ty, literal);
+    for (alias, target) in alias_expansions(infer, ty) {
+        out.push_str(&format!("\ntype {alias} = {target}"));
+    }
+    out
+}
+
+fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: Option<&str>) -> String {
     let bare = ty.without_nil();
-    let is_table = matches!(
-        bare,
-        Type::GlobalTable(_)
-            | Type::Named(..)
-            | Type::Shape(_)
-            | Type::Require(_)
-            | Type::Union(_)
-            | Type::Exports(Some(_))
-    );
-    let members = if is_table { infer.members(&bare) } else { Vec::new() };
+    let members = infer.members(&table_part(infer, &bare, 0));
     if members.is_empty() {
         let value = literal.map(|l| format!(" = {l}")).unwrap_or_default();
-        return format!("{prefix}{name}: {ty}{value}");
+        return format!("{prefix}{name}: {}{value}", shown_type(infer, ty));
     }
     let label = match &bare {
         Type::Named(class, _) => format!("{class} "),
@@ -119,6 +118,58 @@ fn describe_value(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
         out.push_str(&format!("\n    ...(+{})", members.len() - MAX_OVERVIEW_FIELDS));
     }
     out.push_str("\n}");
+    out
+}
+
+/// A top-level `local list = { 'a', 'b' }` is shown as `string[]`, as it would be inside a function,
+/// rather than as the `table` its index entry says.
+fn shown_type(infer: &Infer, ty: &Type) -> Type {
+    match ty {
+        Type::GlobalTable(owner) if owner.starts_with('%') => match infer.key_value_types(ty, true) {
+            (Type::Integer, value) if !value.is_unknown() => Type::Array(Box::new(value)),
+            _ => ty.clone(),
+        },
+        _ => ty.clone(),
+    }
+}
+
+/// The parts of `ty` whose members a hover lists. `"male"|"female"`, or an alias of it, is shown as
+/// itself rather than as the `string` library, and `Garage|string` lists only the `Garage` fields.
+fn table_part(infer: &Infer, ty: &Type, depth: u32) -> Type {
+    if depth > 8 {
+        return Type::Unknown;
+    }
+    match infer.resolve_alias(ty) {
+        Type::Union(types) => Type::union(types.iter().map(|t| table_part(infer, t, depth + 1))),
+        Type::GlobalTable(_) | Type::Named(..) | Type::Shape(_) | Type::Require(_) | Type::Exports(Some(_)) => {
+            ty.clone()
+        }
+        _ => Type::Unknown,
+    }
+}
+
+/// The aliases in `ty` that stand for something other than a table, such as `"male"|"female"`,
+/// expanded one layer the way a class is expanded into its fields.
+fn alias_expansions(infer: &Infer, ty: &Type) -> Vec<(SmolStr, Type)> {
+    let parts = match ty {
+        Type::Union(types) => types.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    let mut out: Vec<(SmolStr, Type)> = Vec::new();
+    for part in parts {
+        let part = match part {
+            Type::Array(inner) => &**inner,
+            other => other,
+        };
+        let Type::Named(name, _) = part else { continue };
+        if infer.index.class(name).is_some() || out.iter().any(|(seen, _)| seen == name) {
+            continue;
+        }
+        let Some((_, alias)) = infer.index.alias(name) else { continue };
+        if table_part(infer, &alias.ty, 0).is_unknown() {
+            out.push((name.clone(), alias.ty.clone()));
+        }
+    }
     out
 }
 
