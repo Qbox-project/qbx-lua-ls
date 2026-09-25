@@ -374,6 +374,17 @@ pub fn type_name_at(line: &str, offset: usize) -> Option<(usize, &str)> {
             let after = names.ty(rest);
             Some(skip_name(after).unwrap_or(after))
         }),
+        "operator" => {
+            if let Some(rest) = skip_name(rest).map(str::trim_start) {
+                let rest = match rest.strip_prefix('(') {
+                    Some(operand) => names.ty(operand).trim_start().strip_prefix(')'),
+                    None => Some(rest),
+                };
+                if let Some(result) = rest.and_then(|rest| rest.trim_start().strip_prefix(':')) {
+                    names.ty(result);
+                }
+            }
+        }
         "generic" => names.list(rest, |names, rest| {
             let rest = skip_name(rest)?.trim_start();
             Some(rest.strip_prefix(':').map_or(rest, |constraint| names.ty(constraint)))
@@ -490,6 +501,10 @@ mod tests {
             "@enum Gar^age",
             "@enum (key) Gar^age",
             "@overload fun(): Gar^age",
+            "@operator add(Gar^age): Vector",
+            "@operator mul(number): Gar^age",
+            "@operator call(): Gar^age",
+            "@operator unm: Gar^age",
             "@generic T, U: table<string, Gar^age>",
             "@generic T: string, U: Gar^age",
             "@cast value +string, -Gar^age",
@@ -525,6 +540,7 @@ mod tests {
             "@class (Gar^age) Child",
             "@enum (Gar^age) Mode",
             "@cast Gar^age string",
+            "@operator Gar^age(number): string",
             "@see Gar^age",
         ] {
             let offset = line.find('^').unwrap();
