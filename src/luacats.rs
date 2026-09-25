@@ -114,6 +114,11 @@ fn strip_visibility(mut rest: &str) -> &str {
     rest
 }
 
+/// The type on a `---| value` line that continues an `@alias`, without its `>` or `+` marker.
+fn alias_member(line: &str) -> Option<&str> {
+    Some(line.trim_start().strip_prefix('|')?.trim_start_matches(['>', '+', ' ']))
+}
+
 /// Splits attributes such as `(exact)`, `(partial)` or `(key)` off the front of a `@class` or `@enum`.
 fn split_attributes(rest: &str) -> (&str, &str) {
     match rest.strip_prefix('(').and_then(|inner| inner.split_once(')')) {
@@ -130,10 +135,10 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
 
     for (index, raw) in lines.iter().enumerate() {
         let line = raw.strip_prefix(' ').unwrap_or(raw);
-        if let Some(member) = line.trim_start().strip_prefix('|') {
+        if let Some(member) = alias_member(line) {
             if open_alias {
                 if let Some(alias) = group.aliases.last_mut() {
-                    let mut parser = TypeParser::new(member.trim_start_matches(['>', '+', ' ']));
+                    let mut parser = TypeParser::new(member);
                     let ty = parser.parse();
                     alias.ty = Type::union([std::mem::take(&mut alias.ty), ty]);
                 }
@@ -326,8 +331,8 @@ impl<'a> TypeNames<'a> {
 /// The class or alias name at byte `offset` of a doc line whose `---` prefix is removed, with the
 /// byte it starts at. Parameter, field and return names, literals and built-in types do not count.
 pub fn type_name_at(line: &str, offset: usize) -> Option<(usize, &str)> {
-    let (tag, rest) = match line.trim_start().strip_prefix('|') {
-        Some(member) => ("|", member.trim_start_matches(['>', '+', ' '])),
+    let (tag, rest) = match alias_member(line) {
+        Some(member) => ("|", member),
         None => split_tag(line)?,
     };
     let mut names = TypeNames { line, found: Vec::new() };
