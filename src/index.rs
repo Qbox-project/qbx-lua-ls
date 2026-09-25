@@ -385,6 +385,11 @@ impl Index {
         Some((file, self.file(file)?.index.aliases.get(i as usize)?))
     }
 
+    pub fn alias_defs(&self, name: &str) -> Vec<(FileId, &AliasDef)> {
+        let Some(slots) = self.aliases.get(name) else { return Vec::new() };
+        slots.iter().filter_map(|(f, i)| Some((*f, self.file(*f)?.index.aliases.get(*i as usize)?))).collect()
+    }
+
     pub fn class_names(&self) -> impl Iterator<Item = &SmolStr> {
         self.classes.keys().chain(self.aliases.keys())
     }

@@ -2,14 +2,15 @@ use lsp_types::{Hover, HoverContents, Position};
 use qbx_fivem_data::{native, native_docs};
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolved};
 use qbx_lua_syntax::ast::ExprKind;
-use qbx_lua_syntax::{SmolStr, Span};
+use qbx_lua_syntax::{CommentKind, SmolStr, Span};
 
 use super::{lua_block, markdown, with_infer};
 use crate::document::Document;
-use crate::index::{FileOrigin, SymbolKind};
+use crate::index::{ClassDef, FileId, FileOrigin, SymbolKind};
 use crate::indexer::render_doc;
 use crate::infer::{Decl, Infer, MemberInfo};
 use crate::locate::locate;
+use crate::luacats::type_name_at;
 use crate::types::Type;
 use crate::workspace::Workspace;
 
@@ -17,14 +18,32 @@ pub enum Target {
     Local(LocalId, Span),
     Global(SmolStr, Span),
     Member { info: MemberInfo, owner: Type, span: Span },
+    Type(SmolStr, Span),
 }
 
 impl Target {
     pub fn span(&self) -> Span {
         match self {
             Target::Local(_, span) | Target::Global(_, span) | Target::Member { span, .. } => *span,
+            Target::Type(_, span) => *span,
         }
     }
+}
+
+/// A class or alias named in the doc comment under the cursor.
+fn annotation_type_at(doc: &Document, offset: u32) -> Option<(SmolStr, Span)> {
+    let comment = doc.chunk.comments.iter().find(|c| c.span.contains_inclusive(offset))?;
+    let content = comment.content.text(&doc.text);
+    // The content of a `---` line starts at its third dash. `--[[@as T]]` is the only long form.
+    let line = match comment.kind {
+        CommentKind::Line => content.strip_prefix('-')?,
+        CommentKind::Long if content.starts_with("@as") => content,
+        _ => return None,
+    };
+    let line_start = comment.content.end - line.len() as u32;
+    let (start, name) = type_name_at(line, offset.checked_sub(line_start)? as usize)?;
+    let start = line_start + start as u32;
+    Some((SmolStr::new(name), Span::new(start, start + name.len() as u32)))
 }
 
 pub fn target_at(infer: &Infer, doc: &Document, offset: u32) -> Option<Target> {
@@ -56,7 +75,7 @@ pub fn target_at(infer: &Infer, doc: &Document, offset: u32) -> Option<Target> {
         let info = infer.member(&owner, &name.text)?;
         return Some(Target::Member { info, owner, span: name.span });
     }
-    None
+    annotation_type_at(doc, offset).map(|(name, span)| Target::Type(name, span))
 }
 
 const MAX_OVERVIEW_FIELDS: usize = 14;
@@ -206,6 +225,51 @@ pub fn member_hover(infer: &Infer, info: &MemberInfo, owner: &Type) -> String {
     out
 }
 
+fn class_hover(infer: &Infer, class: &ClassDef) -> String {
+    let mut declaration = format!("(class) {}", class.name);
+    if !class.parents.is_empty() {
+        declaration.push_str(&format!(" : {}", class.parents.join(", ")));
+    }
+    let members = infer.members(&Type::Named(class.name.clone(), Vec::new()));
+    if !members.is_empty() || class.index.is_some() {
+        declaration.push_str(" {");
+        for member in members.iter().take(MAX_OVERVIEW_FIELDS) {
+            declaration.push_str(&format!("\n    {}: {},", member.name, member.ty));
+        }
+        if let Some((key, value)) = &class.index {
+            declaration.push_str(&format!("\n    [{key}]: {value},"));
+        }
+        if members.len() > MAX_OVERVIEW_FIELDS {
+            declaration.push_str(&format!("\n    ...(+{})", members.len() - MAX_OVERVIEW_FIELDS));
+        }
+        declaration.push_str("\n}");
+    }
+    let mut out = lua_block(&declaration);
+    if let Some(doc) = &class.doc {
+        out.push_str("\n\n");
+        out.push_str(doc);
+    }
+    out
+}
+
+/// A class or alias, preferring workspace declarations over the built-in library and this file's
+/// over those of other files.
+fn type_hover(infer: &Infer, name: &str) -> Option<String> {
+    let preference = |file: FileId| {
+        (infer.index.file(file).is_some_and(|entry| entry.origin != FileOrigin::Stub), file == infer.ctx.file)
+    };
+    if let Some((_, class)) = infer.index.class_defs(name).into_iter().max_by_key(|(file, _)| preference(*file)) {
+        return Some(class_hover(infer, class));
+    }
+    let (_, alias) = infer.index.alias_defs(name).into_iter().max_by_key(|(file, _)| preference(*file))?;
+    let mut out = lua_block(&format!("type {name} = {}", alias.ty));
+    if let Some(doc) = &alias.doc {
+        out.push_str("\n\n");
+        out.push_str(doc);
+    }
+    Some(out)
+}
+
 fn string_hover(ws: &Workspace, doc: &Document, offset: u32) -> Option<(String, Span)> {
     let located = locate(&doc.chunk, offset);
     let (string, call) = located.string?;
@@ -245,6 +309,7 @@ pub fn hover(ws: &Workspace, doc: &Document, position: Position) -> Option<Hover
             Target::Local(id, _) => Some(local_hover(infer, *id)),
             Target::Global(name, _) => global_hover(ws, infer, name),
             Target::Member { info, owner, .. } => Some(member_hover(infer, info, owner)),
+            Target::Type(name, _) => type_hover(infer, name),
         };
         text.map(|t| (t, target.span()))
     })?;

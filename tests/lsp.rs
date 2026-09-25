@@ -239,6 +239,64 @@ fn hover_shows_types_docs_and_natives() {
 }
 
 #[test]
+fn hover_shows_annotation_type_details_and_ranges() {
+    let mut client = Client::start(fixture_root());
+    let declarations = "\
+---A named parking spot.
+---@class Test.Point: GaragePoint
+---@field name string
+---@field locate fun(): Test.Point
+
+---The result of a lookup.
+---@alias Test.Result Test.Point|nil
+
+---@enum Test.Mode
+local modes = { active = 'active', closed = 'closed' }
+";
+    client.open_with("myresource/types.lua", declarations);
+    let text = "local label = '🚗' ---@type Test.Point|Test.Result|Test.Mode|Test.Point\n";
+    client.open_with(CLIENT, text);
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "Test.Point",
+            &[
+                "(class) Test.Point : GaragePoint",
+                "name: string",
+                "locate: fun(): Test.Point",
+                "coords: vector3",
+                "slots: integer?",
+                "A named parking spot.",
+            ],
+        ),
+        ("Test.Result", &["type Test.Result = Test.Point?", "The result of a lookup."]),
+        ("Test.Mode", &["type Test.Mode = \"active\"|\"closed\""]),
+    ];
+
+    // Columns count UTF-16 units past the emoji; the last `Test.Point` must get its own range.
+    let column = |name: &str| text[..text.rfind(name).unwrap()].encode_utf16().count() as u32;
+
+    for &(name, expected) in cases {
+        let column = column(name);
+        let result = client.request("textDocument/hover", client.position_params(CLIENT, 0, column + 1));
+        let hover = result["contents"]["value"].as_str().unwrap_or_default();
+        for part in expected {
+            assert!(hover.contains(*part), "{name}: missing {part:?} in {result}");
+        }
+        assert_eq!(
+            result["range"],
+            json!({
+                "start": { "line": 0, "character": column },
+                "end": { "line": 0, "character": column + name.len() as u32 }
+            })
+        );
+    }
+
+    client.change("myresource/types.lua", 2, &declarations.replace("name string", "name integer"));
+    let hover = client.hover_text(CLIENT, 0, column("Test.Point") + 1);
+    assert!(hover.contains("name: integer"), "{hover}");
+}
+
+#[test]
 fn hover_resolves_exports_across_resources() {
     let mut client = Client::start(fixture_root());
     let text = client.open(SERVER);
@@ -357,6 +415,95 @@ fn goes_to_definitions_across_files() {
     let (l, c) = pos(&text, "print(message, kind, count", 21);
     let result = client.request("textDocument/definition", client.position_params(CLIENT, l, c));
     assert_eq!(result[0]["range"]["start"]["line"], 2);
+}
+
+#[test]
+fn annotation_definitions_and_hovers_use_closed_files() {
+    let mut client = Client::start(fixture_root());
+    let annotations = [
+        ("---@type GaragePoint[]", "GaragePoint", 0),
+        ("---@type table<string, Garage>", "Garage", 36),
+        ("---@param garage Garage", "Garage", 36),
+        ("---@field kind GarageKind", "GarageKind", 5),
+        ("---@class TestGarage: Garage", "Garage", 36),
+        ("---@alias GarageList Garage[]", "Garage", 36),
+        ("---@return Garage garage, GarageKind kind", "GarageKind", 5),
+        ("---@overload fun(point: GaragePoint): Garage", "Garage", 36),
+        ("local garage = {} --[[@as Garage]]", "Garage", 36),
+    ];
+    let text = annotations.iter().map(|(line, ..)| *line).collect::<Vec<_>>().join("\n");
+    client.open_with(CLIENT, &text);
+
+    for (line, (annotation, name, definition_line)) in annotations.iter().enumerate() {
+        let character = annotation.rfind(*name).unwrap() as u32 + 1;
+        let result = client.request("textDocument/definition", client.position_params(CLIENT, line as u32, character));
+        assert_eq!(result.as_array().map(Vec::len), Some(1), "{annotation}: {result}");
+        assert_eq!(result[0]["uri"], client.uri("[core]/mylib/init.lua").as_str(), "{annotation}");
+        assert_eq!(result[0]["range"]["start"]["line"], *definition_line, "{annotation}");
+        let hover = client.hover_text(CLIENT, line as u32, character);
+        assert!(hover.contains(*name), "{annotation}: {hover}");
+    }
+}
+
+#[test]
+fn goes_to_namespaced_types_and_enums_in_unsaved_files() {
+    let mut client = Client::start(fixture_root());
+    let declarations = "---@class Test.Point\n\n---@alias Test.Result Test.Point\n\n---@enum Test.Mode\nlocal modes = { active = 'active' }\n";
+    client.open_with("myresource/types.lua", declarations);
+    let text = "local label = '🚗' ---@type Test.Point|Test.Result|Test.Mode\n";
+    client.open_with(CLIENT, text);
+    // One character into the name, counted in UTF-16 units past the emoji.
+    let column = |name: &str| text[..text.find(name).unwrap() + 1].encode_utf16().count() as u32;
+
+    for (name, line, character) in [("Test.Point", 0, 0), ("Test.Result", 2, 0), ("Test.Mode", 5, 6)] {
+        let result = client.request("textDocument/definition", client.position_params(CLIENT, 0, column(name)));
+        assert_eq!(result.as_array().map(Vec::len), Some(1), "{name}: {result}");
+        assert_eq!(result[0]["uri"], client.uri("myresource/types.lua").as_str());
+        assert_eq!(result[0]["range"]["start"], json!({ "line": line, "character": character }));
+    }
+
+    client.change("myresource/types.lua", 2, &format!("\n{declarations}"));
+    let result = client.request("textDocument/definition", client.position_params(CLIENT, 0, column("Test.Point")));
+    assert_eq!(result[0]["range"]["start"]["line"], 1);
+
+    client.open_with("myresource/extra-types.lua", "---@class Test.Point\n---@alias Test.Result string\n");
+    for name in ["Test.Point", "Test.Result"] {
+        let result = client.request("textDocument/definition", client.position_params(CLIENT, 0, column(name)));
+        let locations = result.as_array().unwrap();
+        assert_eq!(locations.len(), 2, "{name}: {result}");
+        for file in ["myresource/types.lua", "myresource/extra-types.lua"] {
+            assert!(locations.iter().any(|location| location["uri"] == client.uri(file).as_str()), "{result}");
+        }
+    }
+}
+
+#[test]
+fn annotation_features_ignore_names_outside_type_positions() {
+    let mut client = Client::start(fixture_root());
+    let lines = [
+        "---@param Garage string",
+        "---@field Garage string",
+        "---@return string Garage",
+        "---@type 'Garage'",
+        "---@type fun(Garage: string): boolean",
+        "---@type { Garage: string }",
+        "---@type string # Garage",
+        "---Garage is a class.",
+        "-- Garage",
+        "local text = '---@type Garage'",
+        "local text = [[---@type Garage]]",
+        "--[[---@type Garage]]",
+        "---@type MissingGarage",
+    ];
+    client.open_with(CLIENT, &lines.join("\n"));
+
+    for (line, text) in lines.iter().enumerate() {
+        let column = text.find("Garage").unwrap() as u32 + 1;
+        for method in ["textDocument/definition", "textDocument/hover"] {
+            let result = client.request(method, client.position_params(CLIENT, line as u32, column));
+            assert!(result.is_null(), "{method} on {text}: {result}");
+        }
+    }
 }
 
 #[test]
