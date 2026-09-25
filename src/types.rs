@@ -66,6 +66,8 @@ pub struct ShapeField {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Shape {
     pub fields: Vec<ShapeField>,
+    /// The values of the array part, which `ipairs` visits, apart from the other `[key]` entries.
+    pub array: Option<Type>,
     pub index: Option<(Type, Type)>,
 }
 
@@ -259,7 +261,7 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Type::Shape(shape) => {
-                if shape.fields.is_empty() && shape.index.is_none() {
+                if shape.fields.is_empty() && shape.array.is_none() && shape.index.is_none() {
                     return f.write_str("table");
                 }
                 let mut parts: Vec<String> = shape
@@ -268,6 +270,9 @@ impl fmt::Display for Type {
                     .take(8)
                     .map(|field| format!("{}{}: {}", field.name, if field.optional { "?" } else { "" }, field.ty))
                     .collect();
+                if let Some(array) = &shape.array {
+                    parts.push(format!("[integer]: {array}"));
+                }
                 if let Some((k, v)) = &shape.index {
                     parts.push(format!("[{k}]: {v}"));
                 }

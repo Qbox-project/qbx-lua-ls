@@ -43,12 +43,12 @@ pub struct Member {
     pub symbol: Symbol,
 }
 
-/// The entries of a table constructor that have no name: its array part (`key` is `integer`), or
-/// its `[key] = value` pairs.
+/// The entries of a table constructor that have no name: its array part (`key` is `None`), or its
+/// other `[key] = value` pairs.
 #[derive(Clone, Debug)]
 pub struct Element {
     pub owner: SmolStr,
-    pub key: Type,
+    pub key: Option<Type>,
     pub value: Type,
 }
 

@@ -538,19 +538,30 @@ impl<'a> Infer<'a> {
 
     /// `pairs({ 'male', 'female' })`: nothing else can reach a table built in the call, so its keys
     /// and values keep their literal types instead of widening to `string`.
-    fn inline_table_key_values(&self, fields: &[TableField], positional_only: bool) -> (Type, Type) {
+    fn inline_table_key_values(&self, fields: &[TableField], array_only: bool) -> (Type, Type) {
+        let fields = &fields[..fields.len().min(MAX_SHAPE_FIELDS)];
+        let elements = table_elements(fields);
         let mut keys = Vec::new();
         let mut values = Vec::new();
-        for field in fields.iter().take(MAX_SHAPE_FIELDS) {
+        for field in fields.iter().filter(|_| !array_only) {
             let (key, value) = match field {
-                TableField::Positional(value) => (Type::Integer, self.expr(value)),
-                _ if positional_only => continue,
                 TableField::Named { name, value } => (Type::StringLit(name.text.clone()), self.expr(value)),
-                TableField::Keyed { key, value } => (self.expr(key), self.expr(value)),
+                TableField::Keyed { key, value } if matches!(key.kind, ExprKind::String(_)) => {
+                    (self.expr(key), self.expr(value))
+                }
                 TableField::SetMember(name) => (Type::StringLit(name.text.clone()), Type::BooleanLit(true)),
+                TableField::Keyed { .. } | TableField::Positional(_) => continue,
             };
             keys.push(key);
             values.push(value);
+        }
+        for value in elements.array {
+            keys.push(Type::Integer);
+            values.push(self.expr(value));
+        }
+        for (key, value) in elements.keyed.into_iter().filter(|_| !array_only) {
+            keys.push(self.expr(key));
+            values.push(self.expr(value));
         }
         (Type::union(keys), Type::union(values))
     }
@@ -564,10 +575,16 @@ impl<'a> Infer<'a> {
             Type::Map(k, v) => return (*k, *v),
             Type::Shape(shape) => {
                 let fields = shape.fields.iter().filter(|_| !array_only).map(|f| (Type::String, f.ty.clone()));
-                fields.chain(shape.index.clone()).unzip()
+                let array = shape.array.iter().map(|value| (Type::Integer, value.clone()));
+                let index = shape.index.iter().filter(|(key, _)| !array_only || is_integer_key(key)).cloned();
+                fields.chain(array).chain(index).unzip()
             }
             Type::Named(ref name, _) => {
-                let index = self.index.class(name).and_then(|(_, c)| c.index.clone());
+                let index = self
+                    .index
+                    .class(name)
+                    .and_then(|(_, c)| c.index.clone())
+                    .filter(|(key, _)| !array_only || is_integer_key(key));
                 // An instance holds its data; the methods its class provides are not visited.
                 let fields = self
                     .members(&resolved)
@@ -605,26 +622,25 @@ impl<'a> Infer<'a> {
         }
         match self.local_table_fields(owner) {
             Some(fields) => {
-                for field in fields.iter().take(MAX_SHAPE_FIELDS) {
-                    match field {
-                        TableField::Positional(value) => {
-                            keys.push(Type::Integer);
-                            values.push(self.expr(value).widen());
-                        }
-                        TableField::Keyed { key, value } if !array_only && !matches!(key.kind, ExprKind::String(_)) => {
-                            keys.push(self.expr(key).widen());
-                            values.push(self.expr(value).widen());
-                        }
-                        _ => {}
-                    }
+                let elements = table_elements(&fields[..fields.len().min(MAX_SHAPE_FIELDS)]);
+                for value in elements.array {
+                    keys.push(Type::Integer);
+                    values.push(self.expr(value).widen());
+                }
+                for (key, value) in elements.keyed.into_iter().filter(|_| !array_only) {
+                    keys.push(self.expr(key).widen());
+                    values.push(self.expr(value).widen());
                 }
             }
             None => {
                 for element in self.index.elements_of(owner, self.ctx.file) {
-                    if !array_only || element.key == Type::Integer {
-                        keys.push(element.key.clone());
-                        values.push(element.value.clone());
-                    }
+                    let key = match &element.key {
+                        None => Type::Integer,
+                        Some(_) if array_only => continue,
+                        Some(key) => key.clone(),
+                    };
+                    keys.push(key);
+                    values.push(element.value.clone());
                 }
             }
         }
@@ -693,7 +709,7 @@ impl<'a> Infer<'a> {
                 }
                 _ => Type::union(items),
             },
-            Type::Shape(shape) => shape.index.as_ref().map(|(_, v)| v.clone()).unwrap_or_default(),
+            Type::Shape(shape) => Type::union(shape.array.iter().chain(shape.index.as_ref().map(|(_, v)| v)).cloned()),
             Type::Named(name, _) => {
                 self.index.class(&name).and_then(|(_, c)| c.index.as_ref().map(|(_, v)| v.clone())).unwrap_or_default()
             }
@@ -725,45 +741,33 @@ impl<'a> Infer<'a> {
     }
 
     fn table(&self, fields: &[TableField]) -> Type {
-        let mut shape = Shape::default();
-        let mut positional = Vec::new();
-        let (mut keys, mut values) = (Vec::new(), Vec::new());
-        for field in fields.iter().take(MAX_SHAPE_FIELDS) {
-            match field {
-                TableField::Named { name, value } => shape.fields.push(ShapeField {
-                    name: name.text.clone(),
-                    ty: self.expr(value).widen(),
-                    optional: false,
-                }),
-                TableField::Keyed { key, value } => match &key.kind {
-                    ExprKind::String(name) => shape.fields.push(ShapeField {
-                        name: name.clone(),
-                        ty: self.expr(value).widen(),
-                        optional: false,
-                    }),
-                    _ => {
-                        keys.push(self.expr(key).widen());
-                        values.push(self.expr(value).widen());
-                    }
-                },
-                TableField::SetMember(name) => {
-                    shape.fields.push(ShapeField { name: name.text.clone(), ty: Type::Boolean, optional: false })
-                }
-                TableField::Positional(value) => positional.push(self.expr(value).widen()),
-            }
-        }
-        if shape.fields.is_empty() && keys.is_empty() && !positional.is_empty() {
-            return Type::Array(Box::new(Type::union(positional)));
-        }
         if fields.is_empty() {
             return Type::Table;
         }
-        // A mixed table keeps its array part and every `[key]` next to the named fields.
-        if !positional.is_empty() {
-            keys.push(Type::Integer);
-            values.extend(positional);
+        let fields = &fields[..fields.len().min(MAX_SHAPE_FIELDS)];
+        let mut shape = Shape::default();
+        for field in fields {
+            let (name, ty) = match field {
+                TableField::Named { name, value } => (name.text.clone(), self.expr(value).widen()),
+                TableField::Keyed { key: Expr { kind: ExprKind::String(name), .. }, value } => {
+                    (name.clone(), self.expr(value).widen())
+                }
+                TableField::SetMember(name) => (name.text.clone(), Type::Boolean),
+                TableField::Keyed { .. } | TableField::Positional(_) => continue,
+            };
+            shape.fields.push(ShapeField { name, ty, optional: false });
         }
-        if !keys.is_empty() {
+        let elements = table_elements(fields);
+        let array = Type::union(elements.array.iter().map(|value| self.expr(value).widen()));
+        if shape.fields.is_empty() && elements.keyed.is_empty() {
+            return Type::Array(Box::new(array));
+        }
+        if !elements.array.is_empty() {
+            shape.array = Some(array);
+        }
+        if !elements.keyed.is_empty() {
+            let (keys, values): (Vec<Type>, Vec<Type>) =
+                elements.keyed.iter().map(|(key, value)| (self.expr(key).widen(), self.expr(value).widen())).unzip();
             shape.index = Some((Type::union(keys), Type::union(values)));
         }
         Type::Shape(Arc::new(shape))
@@ -1249,6 +1253,45 @@ pub fn table_fields(expr: &Expr) -> Option<&[TableField]> {
         }
         _ => None,
     }
+}
+
+/// The entries of a table constructor that have no name: the array part `ipairs` visits, which
+/// takes in `[n]` keys that continue it as in `{ [1] = 'a', [2] = 'b' }`, and the other `[key]`s.
+pub struct TableElements<'a> {
+    pub array: Vec<&'a Expr>,
+    pub keyed: Vec<(&'a Expr, &'a Expr)>,
+}
+
+pub fn table_elements(fields: &[TableField]) -> TableElements<'_> {
+    let mut elements = TableElements { array: Vec::new(), keyed: Vec::new() };
+    let mut numbered = Vec::new();
+    for field in fields {
+        match field {
+            TableField::Positional(value) => elements.array.push(value),
+            TableField::Keyed { key, value } => match &key.kind {
+                ExprKind::String(_) => {}
+                ExprKind::Number(NumberValue::Int(n)) => numbered.push((*n, key, value)),
+                _ => elements.keyed.push((key, value)),
+            },
+            TableField::Named { .. } | TableField::SetMember(_) => {}
+        }
+    }
+    let mut length = elements.array.len() as i64;
+    while numbered.iter().any(|(n, ..)| *n == length + 1) {
+        length += 1;
+    }
+    for (n, key, value) in numbered {
+        if (1..=length).contains(&n) {
+            elements.array.push(value);
+        } else {
+            elements.keyed.push((key, value));
+        }
+    }
+    elements
+}
+
+fn is_integer_key(key: &Type) -> bool {
+    matches!(key.widen(), Type::Integer | Type::Number)
 }
 
 /// The expressions of the first `return` that belongs to this function body itself.

@@ -309,6 +309,9 @@ for _, item in pairs(list) do end
 for k, v in pairs(mixed) do end
 for i, element in ipairs(mixed) do end
 for name, garage in pairs(garages) do end
+local lookup = { [1] = 'one', [2] = 'two' }
+local fromLookup = lookup[1]
+for _, looked in ipairs(lookup) do end
 ";
     client.open_with(CLIENT, text);
     let cases = [
@@ -317,9 +320,13 @@ for name, garage in pairs(garages) do end
         ("item", "item: string"),
         ("k, v", "k: string|integer"),
         ("v in", "v: integer|string|boolean"),
-        ("element", "element: string"),
+        // `ipairs` stops before `[10]`.
+        ("element", "element: string\n"),
         ("name,", "name: string"),
         ("garage in", "label: string"),
+        ("lookup =", "local lookup: string[]"),
+        ("fromLookup", "fromLookup: string"),
+        ("looked", "looked: string"),
     ];
     for (needle, expected) in cases {
         let (l, c) = pos(text, needle, 0);
@@ -343,10 +350,16 @@ local function f(payload, both, t)
     for k4, v4 in pairs(mixed) do end
     local keyed = { [1] = 'a', [2] = 5 }
     local fromKeyed = keyed[1]
+    local flags = { 'a', [true] = 5 }
+    for _, flagged in ipairs(flags) do end
+    for flag in pairs(flags) do end
 end
 ";
     client.open_with(CLIENT, text);
     let cases: &[(&str, &[&str])] = &[
+        ("flags =", &["flags: { [integer]: string, [boolean]: integer }"]),
+        ("flagged", &["flagged: string\n"]),
+        ("flag in", &["flag: integer|boolean"]),
         ("k1", &["k1: string"]),
         ("v1", &["coords: vector3", "type GarageKind ="]),
         ("k2", &["k2: integer|string"]),

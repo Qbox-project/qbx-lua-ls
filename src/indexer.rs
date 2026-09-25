@@ -12,7 +12,7 @@ use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 use crate::index::{
     AliasDef, ClassDef, Element, EventDef, EventKind, FileId, FileIndex, Index, Member, Symbol, SymbolKind,
 };
-use crate::infer::{table_fields, FileContext, Infer};
+use crate::infer::{table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{parse_doc_lines, DocGroup};
 use crate::types::Type;
 
@@ -308,30 +308,21 @@ impl<'a> Indexer<'a> {
         self.out.aliases.push(AliasDef { name, ty: Type::union(values), doc: None, range });
     }
 
-    fn push_element(&mut self, owner: SmolStr, key: Type, value: Type) {
+    fn push_element(&mut self, owner: SmolStr, key: Option<Type>, value: Type) {
         if self.out.elements.len() < MAX_MEMBERS_PER_FILE {
             self.out.elements.push(Element { owner, key, value });
         }
     }
 
     fn table_members(&mut self, owner: SmolStr, fields: &[TableField], depth: u32) {
-        let (mut array, mut keys, mut values) = (Vec::new(), Vec::new(), Vec::new());
-        for field in fields.iter().take(MAX_TABLE_FIELDS) {
+        let fields = &fields[..fields.len().min(MAX_TABLE_FIELDS)];
+        for field in fields {
             let (name, value) = match field {
                 TableField::Named { name, value } => (name.clone(), value),
                 TableField::Keyed { key: Expr { kind: ExprKind::String(key), span }, value } => {
                     (Name { text: key.clone(), span: *span }, value)
                 }
-                TableField::Positional(value) => {
-                    array.push(self.infer.expr(value).widen());
-                    continue;
-                }
-                TableField::Keyed { key, value } => {
-                    keys.push(self.infer.expr(key).widen());
-                    values.push(self.infer.expr(value).widen());
-                    continue;
-                }
-                TableField::SetMember(_) => continue,
+                TableField::Keyed { .. } | TableField::Positional(_) | TableField::SetMember(_) => continue,
             };
             let nested = format!("{owner}.{}", name.text);
             let mut symbol = self.value_symbol(&name, Some(value), name.span.start, &nested, depth);
@@ -340,12 +331,18 @@ impl<'a> Indexer<'a> {
             }
             self.push_member(owner.clone(), symbol);
         }
-        // Kept apart from the `[key]` pairs, since `ipairs` visits only the array part.
-        if !array.is_empty() {
-            self.push_element(owner.clone(), Type::Integer, Type::union(array));
+        let elements = table_elements(fields);
+        if !elements.array.is_empty() {
+            let array = Type::union(elements.array.iter().map(|value| self.infer.expr(value).widen()));
+            self.push_element(owner.clone(), None, array);
         }
-        if !keys.is_empty() {
-            self.push_element(owner, Type::union(keys), Type::union(values));
+        if !elements.keyed.is_empty() {
+            let (keys, values): (Vec<Type>, Vec<Type>) = elements
+                .keyed
+                .iter()
+                .map(|(key, value)| (self.infer.expr(key).widen(), self.infer.expr(value).widen()))
+                .unzip();
+            self.push_element(owner, Some(Type::union(keys)), Type::union(values));
         }
     }
 
