@@ -312,6 +312,8 @@ for name, garage in pairs(garages) do end
 local lookup = { [1] = 'one', [2] = 'two' }
 local fromLookup = lookup[1]
 for _, looked in ipairs(lookup) do end
+local flagged = { 'a', [true] = 5 }
+local sparse = { 'a', [10] = true }
 ";
     client.open_with(CLIENT, text);
     let cases = [
@@ -327,6 +329,8 @@ for _, looked in ipairs(lookup) do end
         ("lookup =", "local lookup: string[]"),
         ("fromLookup", "fromLookup: string"),
         ("looked", "looked: string"),
+        ("flagged", "local flagged: table"),
+        ("sparse", "local sparse: (string|boolean)[]"),
     ];
     for (needle, expected) in cases {
         let (l, c) = pos(text, needle, 0);
