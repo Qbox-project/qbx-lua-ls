@@ -1223,10 +1223,10 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, generics))),
         Type::Tuple(items) => Type::Tuple(items.iter().map(|t| substitute(t, generics)).collect()),
         Type::Variadic(inner) => Type::Variadic(Box::new(substitute(inner, generics))),
-        // `V?` with `V` unbound is unknown, not `nil`.
+        // `V?` with `V` unbound is unknown, not `nil`, while `V|string` is still a `string`.
         Type::Union(types) => {
             let parts: Vec<Type> = types.iter().map(|t| substitute(t, generics)).collect();
-            if parts.iter().any(Type::is_unknown) {
+            if parts.iter().filter(|t| !matches!(t, Type::Nil)).all(Type::is_unknown) {
                 Type::Unknown
             } else {
                 Type::union(parts)

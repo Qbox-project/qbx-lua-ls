@@ -512,6 +512,11 @@ local function normalize(step)
     return step / 10
 end
 
+---@generic T
+---@param value? T
+---@return T|string
+local function orName(value) end
+
 ---@param steps { [number]: number }
 local function send(steps)
     local mapped = table.mapEntries(steps, function(step, featureId)
@@ -521,6 +526,7 @@ local function send(steps)
         return position, letter
     end)
     local unbound = table.mapEntries(steps, function() end)
+    local named = orName()
 end
 ";
     client.open_with(CLIENT, text);
@@ -532,6 +538,7 @@ end
         ("letter,", "letter: string"),
         ("position)", "position: integer"),
         ("unbound", "unbound: table<unknown, unknown>"),
+        ("named =", "named: string"),
         // Inside the generic function its parameters stay generic.
         ("key, value", "key: K"),
     ];
