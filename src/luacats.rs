@@ -113,6 +113,14 @@ fn strip_visibility(mut rest: &str) -> &str {
     rest
 }
 
+/// Splits attributes such as `(exact)`, `(partial)` or `(key)` off the front of a `@class` or `@enum`.
+fn split_attributes(rest: &str) -> (&str, &str) {
+    match rest.strip_prefix('(').and_then(|inner| inner.split_once(')')) {
+        Some((attributes, rest)) => (attributes, rest.trim_start()),
+        None => ("", rest),
+    }
+}
+
 /// Parses the `---` lines of one contiguous doc comment; every line has its `---` prefix removed.
 pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     let mut group = DocGroup::default();
@@ -138,7 +146,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
         open_alias = false;
         match tag {
             "class" => {
-                let rest = rest.strip_prefix("(exact)").map_or(rest, str::trim_start);
+                let (_, rest) = split_attributes(rest);
                 let (head, parents) = rest.split_once(':').unwrap_or((rest, ""));
                 let name = head.split_whitespace().next().unwrap_or("").split('<').next().unwrap_or("");
                 if name.is_empty() {
@@ -183,7 +191,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 });
                 open_alias = true;
             }
-            "enum" => group.enum_name = rest.split_whitespace().next().map(SmolStr::new),
+            "enum" => group.enum_name = split_attributes(rest).1.split_whitespace().next().map(SmolStr::new),
             "param" => {
                 let mut parser = TypeParser::new(rest);
                 let name = if parser.rest().starts_with("...") {
@@ -320,7 +328,7 @@ pub fn type_name_at(line: &str, offset: usize) -> Option<(usize, &str)> {
     let mut names = TypeNames { line, found: Vec::new() };
     match tag {
         "class" => {
-            let rest = rest.strip_prefix("(exact)").map_or(rest, str::trim_start);
+            let (_, rest) = split_attributes(rest);
             names.declared(rest);
             // Parsing the head as a type skips generic parameters such as the `T` of `Child<T>`.
             let mut head = TypeParser::new(rest);
@@ -329,10 +337,13 @@ pub fn type_name_at(line: &str, offset: usize) -> Option<(usize, &str)> {
                 names.types(parents);
             }
         }
-        "alias" | "enum" => {
+        "alias" => {
             if let Some(rest) = names.declared(rest) {
                 names.types(rest);
             }
+        }
+        "enum" => {
+            names.declared(split_attributes(rest).1);
         }
         "param" => {
             if let Some(rest) = rest.strip_prefix("...").or_else(|| skip_name(rest)) {
@@ -419,6 +430,14 @@ mod tests {
     }
 
     #[test]
+    fn class_and_enum_attributes() {
+        let doc = parse("---@class (partial) Player : Entity");
+        assert_eq!(doc.classes[0].name, "Player");
+        assert_eq!(doc.classes[0].parents, ["Entity"]);
+        assert_eq!(parse("---@enum (key) Side").enum_name.as_deref(), Some("Side"));
+    }
+
+    #[test]
     fn bracketed_descriptions_inside_field_types() {
         let doc = parse(
             "---@class Config.Bleeding\n---@field items table<string, {value: number [how much], anim: table {dict: string [dictionary]}}> [items]",
@@ -455,10 +474,13 @@ mod tests {
             "@field ['value'] Gar^age",
             "@class Gar^age",
             "@class (exact) Child<T>: Parent, Gar^age",
+            "@class (partial) Gar^age",
+            "@class (partial) Child: Gar^age",
             "@alias Gar^age string",
             "@alias Value Gar^age",
             "| > Gar^age # description",
             "@enum Gar^age",
+            "@enum (key) Gar^age",
             "@overload fun(): Gar^age",
             "@generic T, U: table<string, Gar^age>",
             "@generic T: string, U: Gar^age",
@@ -492,6 +514,8 @@ mod tests {
             "@type str^ing",
             "@generic Gar^age: string",
             "@class Child<Gar^age>: Parent",
+            "@class (Gar^age) Child",
+            "@enum (Gar^age) Mode",
             "@cast Gar^age string",
             "@see Gar^age",
         ] {
