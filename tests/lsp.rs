@@ -13,6 +13,7 @@ struct Client {
     next_id: i32,
     diagnostics: HashMap<String, Value>,
     registrations: Vec<Value>,
+    logs: Vec<String>,
     root: PathBuf,
 }
 
@@ -43,6 +44,7 @@ impl Client {
             next_id: 0,
             diagnostics: HashMap::new(),
             registrations: Vec::new(),
+            logs: Vec::new(),
             root,
         };
         let root_uri = Url::from_file_path(&client.root).unwrap();
@@ -68,6 +70,9 @@ impl Client {
             Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => {
                 let uri = n.params["uri"].as_str().unwrap().to_string();
                 self.diagnostics.insert(uri, n.params["diagnostics"].clone());
+            }
+            Message::Notification(n) if n.method == "window/logMessage" => {
+                self.logs.push(n.params["message"].as_str().unwrap_or_default().to_string());
             }
             Message::Request(request) => {
                 if request.method == "client/registerCapability" {
@@ -838,20 +843,23 @@ fn lua_ls_config_supplies_lint_settings_but_not_formatting() {
         .unwrap();
     std::fs::write(
         fixture.0.join(".luarc.json"),
-        r#"{ "diagnostics.globals": ["lib"], "diagnostics.disable": ["lowercase-global"] }"#,
+        r#"{ "diagnostics.globals": ["Config"], "diagnostics.disable": ["lowercase-global"] }"#,
     )
     .unwrap();
-    let text = "helper = function() return lib end\nif helper   then\nprint( helper )\nend\n";
+    let text = "helper = function() return Config end\nif helper   then\nprint( helper )\nend\n";
     std::fs::write(fixture.0.join("main.lua"), text).unwrap();
     let mut client = Client::start(fixture.0.clone());
     client.open_with("main.lua", text);
     assert_eq!(client.diagnostics_for("main.lua"), []);
+    let fallback =
+        |logs: &[String]| logs.iter().filter(|l| l.contains("falling back") && l.contains(".luarc.json")).count();
+    assert_eq!(fallback(&client.logs), 1, "{:?}", client.logs);
 
     let params =
         json!({ "textDocument": { "uri": client.uri("main.lua") }, "options": { "tabSize": 2, "insertSpaces": true } });
     let edits = client.request("textDocument/formatting", params);
     assert_eq!(
-        edits[0]["newText"], "helper = function() return lib end\nif helper then\n  print(helper)\nend\n",
+        edits[0]["newText"], "helper = function() return Config end\nif helper then\n  print(helper)\nend\n",
         "the editor's indentation applies without a qbxlint.toml"
     );
 
@@ -862,7 +870,7 @@ fn lua_ls_config_supplies_lint_settings_but_not_formatting() {
         .filter_map(|w| w["globPattern"].as_str())
         .collect();
     assert!(watchers.contains(&"**/.luarc.json") && watchers.contains(&"**/.emmyrc.json"), "{watchers:?}");
-    std::fs::write(fixture.0.join(".luarc.json"), r#"{ "diagnostics.globals": ["lib"] }"#).unwrap();
+    std::fs::write(fixture.0.join(".luarc.json"), r#"{ "diagnostics.globals": ["Config"] }"#).unwrap();
     client.notify(
         "workspace/didChangeWatchedFiles",
         json!({ "changes": [{ "uri": client.uri(".luarc.json"), "type": 2 }] }),
@@ -872,6 +880,16 @@ fn lua_ls_config_supplies_lint_settings_but_not_formatting() {
         [("lowercase-global".to_string(), 0)],
         "a changed .luarc.json applies"
     );
+    assert_eq!(fallback(&client.logs), 2, "a reloaded fallback is logged again: {:?}", client.logs);
+
+    std::fs::write(fixture.0.join(".luarc.json"), r#"{ "diagnostics.globals": ["#).unwrap();
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": client.uri(".luarc.json"), "type": 2 }] }),
+    );
+    let diagnostics = client.diagnostics_for("main.lua");
+    assert!(diagnostics.iter().any(|(code, _)| code == "undefined-global"), "{diagnostics:?}");
+    assert!(client.logs.iter().any(|l| l.starts_with("skipped") && l.contains(".luarc.json")), "{:?}", client.logs);
 }
 
 #[test]
