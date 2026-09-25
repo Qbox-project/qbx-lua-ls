@@ -398,6 +398,15 @@ for k, v in pairs(TestShop.Lookup) do end
 local function pick(either)
     local picked = either[1]
 end
+
+local shelf = { 'bread', 'water' }
+
+---@param slot string
+local function restock(index, slot)
+    local byIndex = shelf[index]
+    local byNumber = TestShop.Items[tonumber(slot)]
+    local bySlot = shelf[slot]
+end
 ";
     client.open_with(CLIENT, text);
     let cases = [
@@ -407,6 +416,9 @@ end
         ("k, v", "k: integer"),
         ("v in", "v: string|integer"),
         ("picked", "picked: string|integer"),
+        ("byIndex", "byIndex: string"),
+        ("byNumber", "byNumber: string"),
+        ("bySlot", "bySlot: unknown"),
     ];
     for (needle, expected) in cases {
         let (l, c) = pos(text, needle, 0);

@@ -714,7 +714,9 @@ impl<'a> Infer<'a> {
                 self.index.class(&name).and_then(|(_, c)| c.index.as_ref().map(|(_, v)| v.clone())).unwrap_or_default()
             }
             // `list[i]` on a table whose array part the index or a top-level local's constructor holds.
-            Type::GlobalTable(owner) if matches!(key_ty.widen(), Type::Integer | Type::Number) => {
+            Type::GlobalTable(owner)
+                if matches!(key_ty.without_nil().widen(), Type::Integer | Type::Number | Type::Unknown) =>
+            {
                 self.global_table_key_values(&owner, true).1
             }
             Type::String | Type::StringLit(_) => Type::Unknown,
