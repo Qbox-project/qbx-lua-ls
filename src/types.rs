@@ -50,6 +50,8 @@ pub struct FunType {
     pub params: Vec<Param>,
     pub returns: Vec<Type>,
     pub is_method: bool,
+    /// The names declared with `@generic`, bound from the arguments of each call.
+    pub generics: Vec<SmolStr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -505,7 +507,7 @@ impl<'a> TypeParser<'a> {
             self.eat(b',');
         }
         let returns = if self.eat(b':') { self.parse_return_list() } else { Vec::new() };
-        Type::Fun(Arc::new(FunType { params, returns, is_method: false }))
+        Type::Fun(Arc::new(FunType { params, returns, is_method: false, generics: Vec::new() }))
     }
 
     fn parse_return_list(&mut self) -> Vec<Type> {

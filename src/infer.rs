@@ -66,6 +66,12 @@ impl<'a> FileContext<'a> {
     pub fn local_owner_key(&self, decl_start: u32) -> SmolStr {
         SmolStr::new(format!("%f{}:{}", self.file, decl_start))
     }
+
+    /// The declaration behind a `local_owner_key` of this file.
+    fn local_owner_decl(&self, owner: &str) -> Option<u32> {
+        let (file, decl_start) = owner.strip_prefix("%f")?.split_once(':')?;
+        (file.parse::<FileId>().ok()? == self.file).then(|| decl_start.parse().ok()).flatten()
+    }
 }
 
 struct DeclCollector<'a> {
@@ -241,6 +247,7 @@ pub fn native_fun_type(native: &qbx_fivem_data::Native) -> FunType {
             .collect(),
         returns: native.returns().map(native_type).collect(),
         is_method: false,
+        generics: Vec::new(),
     }
 }
 
@@ -436,17 +443,20 @@ impl<'a> Infer<'a> {
         if let Some(ty) = self.on_cache_param(expected).filter(|_| index < 2) {
             return Some(ty);
         }
-        let fun = match &expected.call.kind {
-            ExprKind::Call { callee, .. } => self.expr(callee).as_fun().cloned(),
-            ExprKind::MethodCall { base, method, .. } => {
-                self.member(&self.expr(base), &method.text).and_then(|m| m.ty.as_fun().cloned())
+        let (fun, args, via_method) = match &expected.call.kind {
+            ExprKind::Call { callee, args, .. } => (self.expr(callee).as_fun().cloned(), args, false),
+            ExprKind::MethodCall { base, method, args, .. } => {
+                let member = self.member(&self.expr(base), &method.text);
+                (member.and_then(|m| m.ty.as_fun().cloned()), args, true)
             }
-            _ => None,
-        }?;
-        let (skip_params, skip_args) = fun.call_offsets(matches!(expected.call.kind, ExprKind::MethodCall { .. }));
+            _ => return None,
+        };
+        let fun = fun?;
+        let (skip_params, skip_args) = fun.call_offsets(via_method);
         let param_index = (expected.arg_index + skip_params).checked_sub(skip_args)?;
         let callback = fun.params.get(param_index)?.ty.as_fun()?.clone();
-        callback.params.get(index).map(|p| p.ty.clone())
+        let ty = &callback.params.get(index)?.ty;
+        Some(substitute(ty, &self.bind_generics(&fun, args, via_method, false)))
     }
 
     /// The type `self` has inside `function a.b:c()`, which is also the owner of `c`.
@@ -461,44 +471,121 @@ impl<'a> Infer<'a> {
     fn for_in_type(&self, stmt: &Stmt, index: usize) -> Type {
         let StmtKind::GenericFor { exprs, .. } = &stmt.kind else { return Type::Unknown };
         let Some(first) = exprs.first() else { return Type::Unknown };
-        if let ExprKind::Call { callee, args, .. } = &first.kind {
-            let iterator = callee.dotted_path();
-            if let (Some("pairs" | "ipairs" | "next"), Some(arg)) = (iterator.as_deref(), args.first()) {
-                let (key, value) = self.key_value_types(&self.expr(arg));
-                let key = if iterator.as_deref() == Some("ipairs") { Type::Integer } else { key };
-                return if index == 0 {
-                    key
-                } else if index == 1 {
-                    value
-                } else {
-                    Type::Unknown
-                };
-            }
+        let iterated = match &first.kind {
+            ExprKind::Call { callee, args, .. } => match (callee.dotted_path().as_deref(), args.first()) {
+                (Some(iterator @ ("pairs" | "ipairs" | "next")), Some(arg)) => Some((arg, iterator == "ipairs")),
+                _ => None,
+            },
+            // `for k, v in next, t`
+            _ if first.dotted_path().as_deref() == Some("next") => exprs.get(1).map(|arg| (arg, false)),
+            _ => None,
+        };
+        if let Some((arg, ipairs)) = iterated {
+            let (key, value) = match &arg.unparen().kind {
+                ExprKind::Table(fields) => self.inline_table_key_values(fields, ipairs),
+                _ => self.key_value_types(&self.expr(arg), ipairs),
+            };
+            let key = if ipairs { Type::Integer } else { key };
+            return if index == 0 {
+                key
+            } else if index == 1 {
+                value
+            } else {
+                Type::Unknown
+            };
         }
         self.expr(first).as_fun().and_then(|f| f.returns.get(index).cloned()).unwrap_or_default()
     }
 
-    fn key_value_types(&self, ty: &Type) -> (Type, Type) {
-        match self.resolve_alias(ty) {
-            Type::Array(inner) => (Type::Integer, *inner),
-            Type::Map(k, v) => (*k, *v),
-            Type::Shape(shape) => match &shape.index {
-                Some((k, v)) => (k.clone(), v.clone()),
-                None => (Type::String, Type::union(shape.fields.iter().map(|f| f.ty.clone()))),
-            },
-            Type::Named(name, _) => match self.index.class(&name).and_then(|(_, c)| c.index.clone()) {
-                Some((k, v)) => (k, v),
-                None => (Type::String, Type::Unknown),
-            },
-            Type::GlobalTable(_) => (Type::String, Type::Unknown),
+    /// `pairs({ 'male', 'female' })`: nothing else can reach a table built in the call, so its keys
+    /// and values keep their literal types instead of widening to `string`.
+    fn inline_table_key_values(&self, fields: &[TableField], positional_only: bool) -> (Type, Type) {
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        for field in fields.iter().take(MAX_SHAPE_FIELDS) {
+            let (key, value) = match field {
+                TableField::Positional(value) => (Type::Integer, self.expr(value)),
+                _ if positional_only => continue,
+                TableField::Named { name, value } => (Type::StringLit(name.text.clone()), self.expr(value)),
+                TableField::Keyed { key, value } => (self.expr(key), self.expr(value)),
+                TableField::SetMember(name) => (Type::StringLit(name.text.clone()), Type::BooleanLit(true)),
+            };
+            keys.push(key);
+            values.push(value);
+        }
+        (Type::union(keys), Type::union(values))
+    }
+
+    /// What `pairs` yields for a value of type `ty`, or with `array_only` what `ipairs` yields.
+    pub fn key_value_types(&self, ty: &Type, array_only: bool) -> (Type, Type) {
+        let resolved = self.resolve_alias(ty);
+        let (keys, values): (Vec<Type>, Vec<Type>) = match resolved {
+            Type::Array(inner) => return (Type::Integer, *inner),
+            Type::Tuple(items) => return (Type::Integer, Type::union(items)),
+            Type::Map(k, v) => return (*k, *v),
+            Type::Shape(shape) => {
+                let fields = shape.fields.iter().filter(|_| !array_only).map(|f| (Type::String, f.ty.clone()));
+                fields.chain(shape.index.clone()).unzip()
+            }
+            Type::Named(ref name, _) => {
+                let index = self.index.class(name).and_then(|(_, c)| c.index.clone());
+                // An instance holds its data; the methods its class provides are not visited.
+                let fields = self
+                    .members(&resolved)
+                    .into_iter()
+                    .filter(|m| !array_only && !matches!(m.kind, SymbolKind::Method | SymbolKind::Function))
+                    .map(|m| (Type::String, m.ty));
+                let (keys, values): (Vec<Type>, Vec<Type>) = fields.chain(index).unzip();
+                if keys.is_empty() {
+                    return (Type::String, Type::Unknown);
+                }
+                (keys, values)
+            }
+            Type::GlobalTable(owner) => return self.global_table_key_values(&owner, array_only),
             Type::Union(types) => types
                 .iter()
                 .filter(|t| !matches!(t, Type::Nil))
-                .map(|t| self.key_value_types(t))
-                .next()
-                .unwrap_or_default(),
-            _ => (Type::Unknown, Type::Unknown),
+                .map(|t| self.guarded(|| self.key_value_types(t, array_only)))
+                .unzip(),
+            _ => return (Type::Unknown, Type::Unknown),
+        };
+        (Type::union(keys), Type::union(values))
+    }
+
+    /// The index holds the named fields of a table. Its array part and other keys are only in the
+    /// constructor, which is still at hand for a top-level local of this file.
+    fn global_table_key_values(&self, owner: &SmolStr, array_only: bool) -> (Type, Type) {
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        if !array_only {
+            for member in self.members(&Type::GlobalTable(owner.clone())) {
+                keys.push(Type::String);
+                values.push(member.ty);
+            }
         }
+        for field in self.local_table_fields(owner).unwrap_or_default().iter().take(MAX_SHAPE_FIELDS) {
+            match field {
+                TableField::Positional(value) => {
+                    keys.push(Type::Integer);
+                    values.push(self.expr(value).widen());
+                }
+                TableField::Keyed { key, value } if !array_only && !matches!(key.kind, ExprKind::String(_)) => {
+                    keys.push(self.expr(key).widen());
+                    values.push(self.expr(value).widen());
+                }
+                _ => {}
+            }
+        }
+        if keys.is_empty() {
+            return (Type::String, Type::Unknown);
+        }
+        (Type::union(keys), Type::union(values))
+    }
+
+    fn local_table_fields(&self, owner: &str) -> Option<&'a [TableField]> {
+        let Decl::Local { stmt, index } = self.ctx.decl(self.ctx.local_owner_decl(owner)?)? else { return None };
+        let StmtKind::Local { exprs, .. } = &stmt.kind else { return None };
+        exprs.get(*index).and_then(table_fields)
     }
 
     pub fn resolve_alias(&self, ty: &Type) -> Type {
@@ -526,9 +613,12 @@ impl<'a> Infer<'a> {
 
     fn index_expr(&self, base: &Expr, index: &Expr) -> Type {
         let base_ty = self.expr(base);
-        if let ExprKind::String(key) = &index.kind {
-            if let Some(member) = self.member(&base_ty, key) {
-                return member.ty;
+        let key_ty = self.expr(index);
+        let mut keys = Vec::new();
+        if self.literal_keys(&key_ty, 0, &mut keys) && !keys.is_empty() {
+            let fields: Option<Vec<Type>> = keys.iter().map(|key| self.member(&base_ty, key).map(|m| m.ty)).collect();
+            if let Some(fields) = fields {
+                return Type::union(fields);
             }
         }
         match self.resolve_alias(&base_ty.without_nil()) {
@@ -544,14 +634,37 @@ impl<'a> Infer<'a> {
             Type::Named(name, _) => {
                 self.index.class(&name).and_then(|(_, c)| c.index.as_ref().map(|(_, v)| v.clone())).unwrap_or_default()
             }
+            // `list[i]` on a top-level `local list = { ... }`, whose array part is not in the index.
+            Type::GlobalTable(owner) if matches!(key_ty.widen(), Type::Integer | Type::Number) => {
+                self.global_table_key_values(&owner, true).1
+            }
             Type::String | Type::StringLit(_) => Type::Unknown,
             _ => Type::Unknown,
+        }
+    }
+
+    /// The field names a key can be: `'male'`, or every name of a `"male"|"female"` loop variable or
+    /// alias. False when any part of the key is not a string literal.
+    fn literal_keys(&self, key: &Type, depth: u32, out: &mut Vec<SmolStr>) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        match self.resolve_alias(key) {
+            Type::StringLit(name) => {
+                out.push(name);
+                true
+            }
+            Type::Union(types) => {
+                types.iter().filter(|t| !matches!(t, Type::Nil)).all(|t| self.literal_keys(t, depth + 1, out))
+            }
+            _ => false,
         }
     }
 
     fn table(&self, fields: &[TableField]) -> Type {
         let mut shape = Shape::default();
         let mut positional = Vec::new();
+        let (mut keys, mut values) = (Vec::new(), Vec::new());
         for field in fields.iter().take(MAX_SHAPE_FIELDS) {
             match field {
                 TableField::Named { name, value } => shape.fields.push(ShapeField {
@@ -565,7 +678,10 @@ impl<'a> Infer<'a> {
                         ty: self.expr(value).widen(),
                         optional: false,
                     }),
-                    _ => shape.index = Some((self.expr(key).widen(), self.expr(value).widen())),
+                    _ => {
+                        keys.push(self.expr(key).widen());
+                        values.push(self.expr(value).widen());
+                    }
                 },
                 TableField::SetMember(name) => {
                     shape.fields.push(ShapeField { name: name.text.clone(), ty: Type::Boolean, optional: false })
@@ -573,11 +689,19 @@ impl<'a> Infer<'a> {
                 TableField::Positional(value) => positional.push(self.expr(value).widen()),
             }
         }
-        if shape.fields.is_empty() && shape.index.is_none() && !positional.is_empty() {
+        if shape.fields.is_empty() && keys.is_empty() && !positional.is_empty() {
             return Type::Array(Box::new(Type::union(positional)));
         }
         if fields.is_empty() {
             return Type::Table;
+        }
+        // A mixed table keeps its array part and every `[key]` next to the named fields.
+        if !positional.is_empty() {
+            keys.push(Type::Integer);
+            values.extend(positional);
+        }
+        if !keys.is_empty() {
+            shape.index = Some((Type::union(keys), Type::union(values)));
         }
         Type::Shape(Arc::new(shape))
     }
@@ -653,37 +777,80 @@ impl<'a> Infer<'a> {
             }
         }
         let Some((fun, _)) = self.callee_fun(base, method) else { return Vec::new() };
-        let generics = self.bind_generics(&fun, args, method.is_some());
+        let generics = self.bind_generics(&fun, args, method.is_some(), true);
         fun.returns.iter().map(|ret| substitute(ret, &generics)).collect()
     }
 
-    fn bind_generics(&self, fun: &FunType, args: &[Expr], via_method: bool) -> Vec<(SmolStr, Type)> {
+    /// Binds the generics of `fun` from the arguments of a call. Function literals go last, and only
+    /// `with_callbacks`: their parameters are typed from what the other arguments bound, and their
+    /// returns bind the rest, as `RV` and `RK` in `fun(value: V, key: K): RV, RK`.
+    fn bind_generics(
+        &self,
+        fun: &FunType,
+        args: &[Expr],
+        via_method: bool,
+        with_callbacks: bool,
+    ) -> Vec<(SmolStr, Type)> {
         let mut bound = Vec::new();
         let (skip_params, skip_args) = fun.call_offsets(via_method);
-        for (param, arg) in fun.params.iter().skip(skip_params).zip(args.iter().skip(skip_args)) {
-            let target = match &param.ty {
-                Type::Named(name, args) if args.is_empty() => Some((name, false)),
-                Type::Array(inner) => match &**inner {
-                    Type::Named(name, args) if args.is_empty() => Some((name, true)),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let Some((name, in_array)) = target else { continue };
-            if self.index.class(name).is_some() || self.index.alias(name).is_some() || name.len() > 2 {
-                continue;
+        let pairs: Vec<(&Param, &Expr)> =
+            fun.params.iter().skip(skip_params).zip(args.iter().skip(skip_args)).collect();
+        let is_callback = |arg: &Expr| matches!(arg.unparen().kind, ExprKind::Function(_));
+        for (param, arg) in pairs.iter().filter(|(_, arg)| !is_callback(arg)) {
+            self.unify(fun, &param.ty, &self.expr(arg).widen(), &mut bound, 0);
+        }
+        if with_callbacks {
+            for (param, arg) in pairs.iter().filter(|(_, arg)| is_callback(arg)) {
+                self.unify(fun, &param.ty, &self.expr(arg), &mut bound, 0);
             }
-            let arg_ty = self.expr(arg).widen();
-            let arg_ty = match (in_array, arg_ty) {
-                (true, Type::Array(inner)) => *inner,
-                (true, _) => continue,
-                (false, ty) => ty,
-            };
-            if !arg_ty.is_unknown() && !bound.iter().any(|(n, _)| n == name) {
-                bound.push((name.clone(), arg_ty));
+        }
+        // A declared generic that no argument decides is unknown, not a type named `RV`.
+        for name in &fun.generics {
+            if !bound.iter().any(|(n, _)| n == name) {
+                bound.push((name.clone(), Type::Unknown));
             }
         }
         bound
+    }
+
+    /// Matches a parameter type against the type of its argument, binding the generics in it.
+    fn unify(&self, fun: &FunType, param: &Type, arg: &Type, bound: &mut Vec<(SmolStr, Type)>, depth: u32) {
+        if depth > 8 || arg.is_unknown() {
+            return;
+        }
+        match param {
+            Type::Named(name, args) if args.is_empty() && self.is_generic(fun, name) => {
+                if !bound.iter().any(|(n, _)| n == name) {
+                    bound.push((name.clone(), arg.clone()));
+                }
+            }
+            Type::Array(inner) => self.unify(fun, inner, &self.key_value_types(arg, true).1, bound, depth + 1),
+            Type::Map(key, value) => {
+                let (arg_key, arg_value) = self.key_value_types(arg, false);
+                self.unify(fun, key, &arg_key, bound, depth + 1);
+                self.unify(fun, value, &arg_value, bound, depth + 1);
+            }
+            Type::Union(types) => {
+                for part in types.iter().filter(|t| !matches!(t, Type::Nil)) {
+                    self.unify(fun, part, &arg.without_nil(), bound, depth + 1);
+                }
+            }
+            Type::Fun(expected) => {
+                if let Some(given) = arg.as_fun() {
+                    for (want, got) in expected.returns.iter().zip(&given.returns) {
+                        self.unify(fun, want, got, bound, depth + 1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A name `fun` declares with `@generic`, or a short one such as `T` that is neither a class nor
+    /// an alias.
+    fn is_generic(&self, fun: &FunType, name: &str) -> bool {
+        fun.generics.iter().any(|g| g == name)
+            || (name.len() <= 2 && self.index.class(name).is_none() && self.index.alias(name).is_none())
     }
 
     /// Builds the type of a function literal from its doc comment, inferring returns when undocumented.
@@ -873,9 +1040,26 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
         Type::Named(name, args) if args.is_empty() => {
             generics.iter().find(|(n, _)| n == name).map_or_else(|| ty.clone(), |(_, bound)| bound.clone())
         }
+        Type::Named(name, args) => Type::Named(name.clone(), args.iter().map(|t| substitute(t, generics)).collect()),
         Type::Array(inner) => Type::Array(Box::new(substitute(inner, generics))),
-        Type::Union(types) => Type::union(types.iter().map(|t| substitute(t, generics))),
+        Type::Tuple(items) => Type::Tuple(items.iter().map(|t| substitute(t, generics)).collect()),
+        Type::Variadic(inner) => Type::Variadic(Box::new(substitute(inner, generics))),
+        // `V?` with `V` unbound is unknown, not `nil`.
+        Type::Union(types) => {
+            let parts: Vec<Type> = types.iter().map(|t| substitute(t, generics)).collect();
+            if parts.iter().any(Type::is_unknown) {
+                Type::Unknown
+            } else {
+                Type::union(parts)
+            }
+        }
         Type::Map(k, v) => Type::Map(Box::new(substitute(k, generics)), Box::new(substitute(v, generics))),
+        Type::Fun(fun) => Type::Fun(Arc::new(FunType {
+            params: fun.params.iter().map(|p| Param { ty: substitute(&p.ty, generics), ..p.clone() }).collect(),
+            returns: fun.returns.iter().map(|t| substitute(t, generics)).collect(),
+            is_method: fun.is_method,
+            generics: Vec::new(),
+        })),
         other => other.clone(),
     }
 }

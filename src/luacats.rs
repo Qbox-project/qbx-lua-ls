@@ -84,7 +84,12 @@ impl DocGroup {
             let ty = self.params.iter().find(|p| p.name == "...").map_or(Type::Any, |p| p.ty.clone());
             params.push(Param { name: "...".into(), ty, optional: false });
         }
-        FunType { params, returns: self.returns.iter().map(|r| r.ty.clone()).collect(), is_method }
+        FunType {
+            params,
+            returns: self.returns.iter().map(|r| r.ty.clone()).collect(),
+            is_method,
+            generics: self.generics.clone(),
+        }
     }
 
     pub fn param_description(&self, name: &str) -> Option<&str> {
