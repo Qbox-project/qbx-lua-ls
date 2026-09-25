@@ -297,6 +297,16 @@ local modes = { active = 'active', closed = 'closed' }
 }
 
 #[test]
+fn key_enums_are_the_union_of_their_keys() {
+    let mut client = Client::start(fixture_root());
+    let declarations = "---@enum (key) Test.Side\nlocal sides = { client = 1, ['server'] = 2 }\n";
+    client.open_with("myresource/types.lua", declarations);
+    client.open_with(CLIENT, "---@type Test.Side\n");
+    let hover = client.hover_text(CLIENT, 0, 12);
+    assert!(hover.contains("type Test.Side = \"client\"|\"server\""), "{hover}");
+}
+
+#[test]
 fn hover_resolves_exports_across_resources() {
     let mut client = Client::start(fixture_root());
     let text = client.open(SERVER);

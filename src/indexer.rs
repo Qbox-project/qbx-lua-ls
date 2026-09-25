@@ -252,7 +252,7 @@ impl<'a> Indexer<'a> {
                     let fields = table_fields(expr).unwrap_or_default();
                     kind = SymbolKind::Table;
                     if let Some(enum_name) = &doc.enum_name {
-                        self.enum_class(enum_name.clone(), fields, name.span);
+                        self.enum_class(enum_name.clone(), doc.enum_keys, fields, name.span);
                     }
                     self.table_members(SmolStr::new(nested_owner), fields, table_depth + 1);
                     Type::GlobalTable(SmolStr::new(nested_owner))
@@ -292,10 +292,12 @@ impl<'a> Indexer<'a> {
         (is_literal && text.len() <= 48 && !text.contains('\n')).then(|| SmolStr::new(text))
     }
 
-    fn enum_class(&mut self, name: SmolStr, fields: &[TableField], span: Span) {
+    fn enum_class(&mut self, name: SmolStr, keys: bool, fields: &[TableField], span: Span) {
         let values: Vec<Type> = fields
             .iter()
             .filter_map(|f| match f {
+                TableField::Named { name: key, .. } if keys => Some(Type::StringLit(key.text.clone())),
+                TableField::Keyed { key, .. } if keys => Some(self.infer.expr(key)),
                 TableField::Named { value, .. } | TableField::Keyed { value, .. } => Some(self.infer.expr(value)),
                 _ => None,
             })
@@ -351,7 +353,7 @@ impl<'a> Indexer<'a> {
                                 None => self.ctx.local_owner_key(name.name.span.start),
                             };
                             if let Some(enum_name) = &doc.enum_name {
-                                self.enum_class(enum_name.clone(), fields, name.name.span);
+                                self.enum_class(enum_name.clone(), doc.enum_keys, fields, name.name.span);
                             }
                             self.table_members(owner, fields, 1);
                         }

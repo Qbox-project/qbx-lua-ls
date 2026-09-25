@@ -57,6 +57,7 @@ pub struct DocGroup {
     pub returns: Vec<DocReturn>,
     pub ty: Option<Type>,
     pub enum_name: Option<SmolStr>,
+    pub enum_keys: bool,
     pub generics: Vec<SmolStr>,
     pub overloads: Vec<Arc<FunType>>,
     pub deprecated: Option<String>,
@@ -191,7 +192,11 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
                 });
                 open_alias = true;
             }
-            "enum" => group.enum_name = split_attributes(rest).1.split_whitespace().next().map(SmolStr::new),
+            "enum" => {
+                let (attributes, rest) = split_attributes(rest);
+                group.enum_name = rest.split_whitespace().next().map(SmolStr::new);
+                group.enum_keys = attributes.split(',').any(|attribute| attribute.trim() == "key");
+            }
             "param" => {
                 let mut parser = TypeParser::new(rest);
                 let name = if parser.rest().starts_with("...") {
@@ -434,7 +439,10 @@ mod tests {
         let doc = parse("---@class (partial) Player : Entity");
         assert_eq!(doc.classes[0].name, "Player");
         assert_eq!(doc.classes[0].parents, ["Entity"]);
-        assert_eq!(parse("---@enum (key) Side").enum_name.as_deref(), Some("Side"));
+        let doc = parse("---@enum (key) Side");
+        assert_eq!(doc.enum_name.as_deref(), Some("Side"));
+        assert!(doc.enum_keys);
+        assert!(!parse("---@enum Side").enum_keys);
     }
 
     #[test]
