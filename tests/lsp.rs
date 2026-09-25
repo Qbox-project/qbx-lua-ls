@@ -417,11 +417,17 @@ local function arity(x) end
 ---@param cb fun(found: integer)
 local function lookup(id, cb) end
 
+---@overload fun(filter: table?, cb: fun(found: string))
+---@param id? integer
+---@param cb fun(found: integer)
+local function search(id, cb) end
+
 local byId = find(1)
 local byName = find('x')
 local none = arity()
 lookup('x', function(named) end)
 lookup(1, function(numbered) end)
+search(nil, function(byNil) end)
 ";
     client.open_with(CLIENT, text);
     let cases = [
@@ -430,6 +436,8 @@ lookup(1, function(numbered) end)
         ("none", "none: boolean"),
         ("named", "named: string"),
         ("numbered", "numbered: integer"),
+        // `nil` fills the optional `id`, so the declared signature still fits.
+        ("byNil", "byNil: integer"),
     ];
     for (needle, expected) in cases {
         let (l, c) = pos(text, needle, 0);

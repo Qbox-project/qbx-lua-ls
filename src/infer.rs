@@ -905,10 +905,8 @@ impl<'a> Infer<'a> {
         if args.len() - usize::from(open_ended) > fixed.len() && !variadic {
             return false;
         }
-        let missing_required = fixed
-            .iter()
-            .skip(args.len())
-            .any(|p| !p.optional && self.value_kinds(fun, &p.ty, 0).is_some_and(|kinds| kinds & kind::NIL == 0));
+        let missing_required =
+            fixed.iter().skip(args.len()).any(|p| self.param_kinds(fun, p).is_some_and(|kinds| kinds & kind::NIL == 0));
         if missing_required && !open_ended {
             return false;
         }
@@ -918,11 +916,16 @@ impl<'a> Infer<'a> {
                 ExprKind::Function(_) => Some(kind::FUNCTION),
                 _ => self.value_kinds(fun, &self.expr(arg), 0),
             };
-            match (self.value_kinds(fun, &param.ty, 0), given) {
+            match (self.param_kinds(fun, param), given) {
                 (Some(wanted), Some(given)) => wanted & given != 0,
                 _ => true,
             }
         })
+    }
+
+    /// The kinds of value a parameter takes: `id? integer` is stored as `integer`, and also takes `nil`.
+    fn param_kinds(&self, fun: &FunType, param: &Param) -> Option<u8> {
+        self.value_kinds(fun, &param.ty, 0).map(|kinds| if param.optional { kinds | kind::NIL } else { kinds })
     }
 
     /// The kinds of Lua value `ty` allows, as a set of `kind` bits, or `None` when it allows any.
