@@ -446,6 +446,8 @@ local priceById = OverloadedShop:price(1)
 local stockByLabel = OverloadedShop:stock('bread')
 local stockViaDot = OverloadedShop.stock(OverloadedShop, 'bread')
 local priceViaDot = OverloadedShop.price(OverloadedShop, 'bread')
+local flat = vec(1, 2)
+local deep = vec(1, 2, 3)
 ";
     client.open_with(CLIENT, text);
     let cases = [
@@ -461,6 +463,9 @@ local priceViaDot = OverloadedShop.price(OverloadedShop, 'bread')
         ("stockByLabel", "stockByLabel: string"),
         ("stockViaDot", "stockViaDot: string"),
         ("priceViaDot", "priceViaDot: string"),
+        // `vec(...)` takes any number of values, but its overloads name the exact ones.
+        ("flat", "flat: vector2"),
+        ("deep", "deep: vector3"),
     ];
     for (needle, expected) in cases {
         let (l, c) = pos(text, needle, 0);

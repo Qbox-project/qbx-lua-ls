@@ -28,6 +28,15 @@ mod kind {
     pub const OTHER: u8 = 64;
 }
 
+/// How well a call's arguments line up with a signature.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Fit {
+    No,
+    /// Only by passing some of them to its `...`.
+    ThroughVararg,
+    Exact,
+}
+
 pub enum Decl<'a> {
     Local { stmt: &'a Stmt, index: usize },
     LocalFunction { stmt: &'a Stmt, func: &'a FuncBody },
@@ -883,16 +892,17 @@ impl<'a> Infer<'a> {
         }
     }
 
-    /// The signature a call uses: the declared one, or else the first `@overload` whose arity and
-    /// argument kinds fit.
+    /// The signature a call uses: the declared one, or else the first `@overload` that fits better,
+    /// so `fun(x, y, z): vector3` wins over a `vec(...)` that only takes three values through `...`.
     fn signature_for(&self, fun: &Arc<FunType>, args: &[Expr], via_method: bool) -> Arc<FunType> {
-        if fun.overloads.is_empty() || self.fits(fun, args, via_method) {
+        if fun.overloads.is_empty() {
             return fun.clone();
         }
-        fun.overloads.iter().find(|overload| self.fits(overload, args, via_method)).unwrap_or(fun).clone()
+        let declared = self.fit(fun, args, via_method);
+        fun.overloads.iter().find(|overload| self.fit(overload, args, via_method) > declared).unwrap_or(fun).clone()
     }
 
-    fn fits(&self, fun: &FunType, args: &[Expr], via_method: bool) -> bool {
+    fn fit(&self, fun: &FunType, args: &[Expr], via_method: bool) -> Fit {
         let (skip_params, skip_args) = fun.call_offsets(via_method);
         let params = fun.params.get(skip_params..).unwrap_or_default();
         let args = args.get(skip_args..).unwrap_or_default();
@@ -902,15 +912,16 @@ impl<'a> Infer<'a> {
         };
         // A call ending in `f()` or `...` passes any number of values in its last argument.
         let open_ended = args.last().is_some_and(Expr::is_multi_value);
-        if args.len() - usize::from(open_ended) > fixed.len() && !variadic {
-            return false;
+        let through_vararg = args.len() - usize::from(open_ended) > fixed.len();
+        if through_vararg && !variadic {
+            return Fit::No;
         }
         let missing_required =
             fixed.iter().skip(args.len()).any(|p| self.param_kinds(fun, p).is_some_and(|kinds| kinds & kind::NIL == 0));
         if missing_required && !open_ended {
-            return false;
+            return Fit::No;
         }
-        fixed.iter().zip(args).all(|(param, arg)| {
+        let kinds_fit = fixed.iter().zip(args).all(|(param, arg)| {
             // A function literal is not inferred here: its parameters may be typed from this very call.
             let given = match arg.unparen().kind {
                 ExprKind::Function(_) => Some(kind::FUNCTION),
@@ -920,7 +931,12 @@ impl<'a> Infer<'a> {
                 (Some(wanted), Some(given)) => wanted & given != 0,
                 _ => true,
             }
-        })
+        });
+        match (kinds_fit, through_vararg) {
+            (false, _) => Fit::No,
+            (true, true) => Fit::ThroughVararg,
+            (true, false) => Fit::Exact,
+        }
     }
 
     /// The kinds of value a parameter takes: `id? integer` is stored as `integer`, and also takes `nil`.
