@@ -214,11 +214,18 @@ impl Server {
             stats.millis,
             qbx_fivem_data::native_count()
         ));
+        self.log_config_notes();
         self.register_watchers();
     }
 
     fn log(&self, message: String) {
         self.notify::<notif::LogMessage>(LogMessageParams { typ: MessageType::INFO, message });
+    }
+
+    fn log_config_notes(&self) {
+        for note in &self.ws.lint_config.notes {
+            self.log(note.clone());
+        }
     }
 
     fn notify<N: notif::Notification>(&self, params: N::Params) {
@@ -522,14 +529,13 @@ impl Server {
 
     fn watched_files_changed(&mut self, changes: Vec<FileEvent>) {
         let mut manifests_changed = false;
+        let mut config_changed = false;
         for change in changes {
             let Some(path) = uri_to_path(&change.uri) else { continue };
             if path.extension().is_some_and(|e| e == "cfg") {
                 qbx_lua_analysis::startup::clear_cache();
             } else if path.extension().is_some_and(|e| e == "toml") || is_lua_ls_config(&path) {
-                if let Some(root) = self.ws.roots.first() {
-                    self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
-                }
+                config_changed = true;
             } else if is_manifest_file(&path) {
                 // A manifest appearing or vanishing changes which resources count as installed.
                 qbx_lua_analysis::startup::clear_cache();
@@ -543,6 +549,12 @@ impl Server {
         }
         if manifests_changed {
             self.ws.link_imports();
+        }
+        if config_changed {
+            if let Some(root) = self.ws.roots.first() {
+                self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
+            }
+            self.log_config_notes();
         }
         self.workspace_stale = true;
         self.dirty.extend(self.docs.keys().cloned());
@@ -679,6 +691,7 @@ impl Server {
             "qbx/reindex" => {
                 qbx_lua_analysis::startup::clear_cache();
                 let stats = self.ws.scan();
+                self.log_config_notes();
                 self.dirty.extend(self.docs.keys().cloned());
                 // Restore unsaved text before any request or closed-file diagnostic can see the
                 // rebuilt index. A second pass settles types shared between open documents.
