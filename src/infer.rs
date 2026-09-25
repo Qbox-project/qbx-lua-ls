@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -35,6 +35,23 @@ enum Fit {
     /// Only by passing some of them to its `...`.
     ThroughVararg,
     Exact,
+}
+
+/// The arguments of one call, each inferred at most once while its signature is chosen and its
+/// generics are bound.
+struct CallArgs<'e> {
+    exprs: &'e [Expr],
+    types: Vec<OnceCell<Type>>,
+}
+
+impl<'e> CallArgs<'e> {
+    fn new(exprs: &'e [Expr]) -> Self {
+        Self { exprs, types: exprs.iter().map(|_| OnceCell::new()).collect() }
+    }
+
+    fn ty(&self, infer: &Infer, index: usize) -> &Type {
+        self.types[index].get_or_init(|| infer.expr(&self.exprs[index]))
+    }
 }
 
 pub enum Decl<'a> {
@@ -472,12 +489,13 @@ impl<'a> Infer<'a> {
             }
             _ => return None,
         };
-        let fun = self.signature_for(&fun?, args, via_method);
+        let args = CallArgs::new(args);
+        let fun = self.signature_for(&fun?, &args, via_method);
         let (skip_params, skip_args) = fun.call_offsets(via_method);
         let param_index = (expected.arg_index + skip_params).checked_sub(skip_args)?;
         let callback = fun.params.get(param_index)?.ty.as_fun()?.clone();
         let ty = &callback.params.get(index)?.ty;
-        Some(substitute(ty, &self.bind_generics(&fun, args, via_method, false)))
+        Some(substitute(ty, &self.bind_generics(&fun, &args, via_method, false)))
     }
 
     /// The type `self` has inside `function a.b:c()`, which is also the owner of `c`.
@@ -822,8 +840,9 @@ impl<'a> Infer<'a> {
             }
         }
         let Some((fun, _)) = self.callee_fun(base, method) else { return Vec::new() };
-        let fun = self.signature_for(&fun, args, method.is_some());
-        let generics = self.bind_generics(&fun, args, method.is_some(), true);
+        let args = CallArgs::new(args);
+        let fun = self.signature_for(&fun, &args, method.is_some());
+        let generics = self.bind_generics(&fun, &args, method.is_some(), true);
         fun.returns.iter().map(|ret| substitute(ret, &generics)).collect()
     }
 
@@ -833,21 +852,26 @@ impl<'a> Infer<'a> {
     fn bind_generics(
         &self,
         fun: &FunType,
-        args: &[Expr],
+        args: &CallArgs,
         via_method: bool,
         with_callbacks: bool,
     ) -> Vec<(SmolStr, Type)> {
         let mut bound = Vec::new();
         let (skip_params, skip_args) = fun.call_offsets(via_method);
-        let pairs: Vec<(&Param, &Expr)> =
-            fun.params.iter().skip(skip_params).zip(args.iter().skip(skip_args)).collect();
-        let is_callback = |arg: &Expr| matches!(arg.unparen().kind, ExprKind::Function(_));
-        for (param, arg) in pairs.iter().filter(|(_, arg)| !is_callback(arg)) {
-            self.unify(fun, &param.ty, &self.expr(arg).widen(), &mut bound, 0);
+        let bindable: Vec<(&Param, usize)> = fun
+            .params
+            .iter()
+            .skip(skip_params)
+            .zip(skip_args..args.exprs.len())
+            .filter(|(param, _)| self.can_bind(fun, &param.ty))
+            .collect();
+        let is_callback = |i: &usize| matches!(args.exprs[*i].unparen().kind, ExprKind::Function(_));
+        for (param, i) in bindable.iter().filter(|(_, i)| !is_callback(i)) {
+            self.unify(fun, &param.ty, &args.ty(self, *i).widen(), &mut bound, 0);
         }
         if with_callbacks {
-            for (param, arg) in pairs.iter().filter(|(_, arg)| is_callback(arg)) {
-                self.unify(fun, &param.ty, &self.expr(arg), &mut bound, 0);
+            for (param, i) in bindable.iter().filter(|(_, i)| is_callback(i)) {
+                self.unify(fun, &param.ty, args.ty(self, *i), &mut bound, 0);
             }
         }
         // A declared generic that no argument decides is unknown, not a type named `RV`.
@@ -892,9 +916,21 @@ impl<'a> Infer<'a> {
         }
     }
 
+    /// Whether an argument passed for `param` can bind a generic of `fun`, as far as `unify` looks.
+    fn can_bind(&self, fun: &FunType, param: &Type) -> bool {
+        match param {
+            Type::Named(name, args) => args.is_empty() && self.is_generic(fun, name),
+            Type::Array(inner) => self.can_bind(fun, inner),
+            Type::Map(key, value) => self.can_bind(fun, key) || self.can_bind(fun, value),
+            Type::Union(types) => types.iter().any(|t| self.can_bind(fun, t)),
+            Type::Fun(expected) => expected.returns.iter().any(|t| self.can_bind(fun, t)),
+            _ => false,
+        }
+    }
+
     /// The signature a call uses: the declared one, or else the first `@overload` that fits better,
     /// so `fun(x, y, z): vector3` wins over a `vec(...)` that only takes three values through `...`.
-    fn signature_for(&self, fun: &Arc<FunType>, args: &[Expr], via_method: bool) -> Arc<FunType> {
+    fn signature_for(&self, fun: &Arc<FunType>, args: &CallArgs, via_method: bool) -> Arc<FunType> {
         if fun.overloads.is_empty() {
             return fun.clone();
         }
@@ -902,10 +938,10 @@ impl<'a> Infer<'a> {
         fun.overloads.iter().find(|overload| self.fit(overload, args, via_method) > declared).unwrap_or(fun).clone()
     }
 
-    fn fit(&self, fun: &FunType, args: &[Expr], via_method: bool) -> Fit {
+    fn fit(&self, fun: &FunType, call: &CallArgs, via_method: bool) -> Fit {
         let (skip_params, skip_args) = fun.call_offsets(via_method);
         let params = fun.params.get(skip_params..).unwrap_or_default();
-        let args = args.get(skip_args..).unwrap_or_default();
+        let args = call.exprs.get(skip_args..).unwrap_or_default();
         let (fixed, variadic) = match params.split_last() {
             Some((last, rest)) if last.name == "..." => (rest, true),
             _ => (params, false),
@@ -921,11 +957,11 @@ impl<'a> Infer<'a> {
         if missing_required && !open_ended {
             return Fit::No;
         }
-        let kinds_fit = fixed.iter().zip(args).all(|(param, arg)| {
+        let kinds_fit = fixed.iter().zip(args).enumerate().all(|(i, (param, arg))| {
             // A function literal is not inferred here: its parameters may be typed from this very call.
             let given = match arg.unparen().kind {
                 ExprKind::Function(_) => Some(kind::FUNCTION),
-                _ => self.value_kinds(fun, &self.expr(arg), 0),
+                _ => self.value_kinds(fun, call.ty(self, skip_args + i), 0),
             };
             match (self.param_kinds(fun, param), given) {
                 (Some(wanted), Some(given)) => wanted & given != 0,
