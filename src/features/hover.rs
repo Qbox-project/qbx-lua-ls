@@ -121,11 +121,11 @@ fn value_overview(infer: &Infer, prefix: &str, name: &str, ty: &Type, literal: O
     out
 }
 
-/// A top-level `local list = { 'a', 'b' }` is shown as `string[]`, as it would be inside a function,
-/// rather than as the `table` its index entry says.
+/// A table the index holds with only an array part, such as `local list = { 'a', 'b' }` or
+/// `Config.Items = { 'a', 'b' }`, is shown as `string[]` rather than as a bare `table`.
 fn shown_type(infer: &Infer, ty: &Type) -> Type {
     match ty {
-        Type::GlobalTable(owner) if owner.starts_with('%') => match infer.key_value_types(ty, true) {
+        Type::GlobalTable(_) => match infer.key_value_types(ty, true) {
             (Type::Integer, value) if !value.is_unknown() => Type::Array(Box::new(value)),
             _ => ty.clone(),
         },
