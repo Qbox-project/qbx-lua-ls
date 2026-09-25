@@ -517,6 +517,12 @@ end
 ---@return T|string
 local function orName(value) end
 
+---@generic T
+---@param value T
+---@param onBox? fun(box: { value: T })
+---@return { value: T }
+local function box(value, onBox) end
+
 ---@param steps { [number]: number }
 local function send(steps)
     local mapped = table.mapEntries(steps, function(step, featureId)
@@ -527,6 +533,7 @@ local function send(steps)
     end)
     local unbound = table.mapEntries(steps, function() end)
     local named = orName()
+    local boxed = box(1, function(opened) end)
 end
 ";
     client.open_with(CLIENT, text);
@@ -539,6 +546,8 @@ end
         ("position)", "position: integer"),
         ("unbound", "unbound: table<unknown, unknown>"),
         ("named =", "named: string"),
+        ("boxed", "value: integer"),
+        ("opened", "value: integer"),
         // Inside the generic function its parameters stay generic.
         ("key, value", "key: K"),
     ];

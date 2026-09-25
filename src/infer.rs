@@ -1240,6 +1240,11 @@ fn substitute(ty: &Type, generics: &[(SmolStr, Type)]) -> Type {
             generics: Vec::new(),
             overloads: Vec::new(),
         })),
+        Type::Shape(shape) => Type::Shape(Arc::new(Shape {
+            fields: shape.fields.iter().map(|f| ShapeField { ty: substitute(&f.ty, generics), ..f.clone() }).collect(),
+            array: shape.array.as_ref().map(|t| substitute(t, generics)),
+            index: shape.index.as_ref().map(|(k, v)| (substitute(k, generics), substitute(v, generics))),
+        })),
         other => other.clone(),
     }
 }
