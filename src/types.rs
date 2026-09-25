@@ -52,6 +52,8 @@ pub struct FunType {
     pub is_method: bool,
     /// The names declared with `@generic`, bound from the arguments of each call.
     pub generics: Vec<SmolStr>,
+    /// The `@overload` signatures, for calls the declared one does not fit.
+    pub overloads: Vec<Arc<FunType>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -507,7 +509,7 @@ impl<'a> TypeParser<'a> {
             self.eat(b',');
         }
         let returns = if self.eat(b':') { self.parse_return_list() } else { Vec::new() };
-        Type::Fun(Arc::new(FunType { params, returns, is_method: false, generics: Vec::new() }))
+        Type::Fun(Arc::new(FunType { params, returns, is_method: false, generics: Vec::new(), overloads: Vec::new() }))
     }
 
     fn parse_return_list(&mut self) -> Vec<Type> {

@@ -367,6 +367,78 @@ end
 }
 
 #[test]
+fn hover_indexes_global_arrays_and_unions() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+TestShop = {}
+TestShop.Items = { 'bread', 'water' }
+TestShop.Lookup = { [1] = 'one', [2] = 2 }
+local firstItem = TestShop.Items[1]
+for _, item in ipairs(TestShop.Items) do end
+for k, v in pairs(TestShop.Lookup) do end
+
+---@param either string[]|integer[]
+local function pick(either)
+    local picked = either[1]
+end
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("Items[1]", "TestShop.Items: string[]"),
+        ("firstItem", "firstItem: string"),
+        ("item in", "item: string"),
+        ("k, v", "k: integer"),
+        ("v in", "v: string|integer"),
+        ("picked", "picked: string|integer"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
+fn hover_picks_the_overload_a_call_fits() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+---@overload fun(name: string): string
+---@param id integer
+---@return integer
+local function find(id) end
+
+---@overload fun(): boolean
+---@param x string
+---@return string
+local function arity(x) end
+
+---@overload fun(name: string, cb: fun(found: string))
+---@param id integer
+---@param cb fun(found: integer)
+local function lookup(id, cb) end
+
+local byId = find(1)
+local byName = find('x')
+local none = arity()
+lookup('x', function(named) end)
+lookup(1, function(numbered) end)
+";
+    client.open_with(CLIENT, text);
+    let cases = [
+        ("byId", "byId: integer"),
+        ("byName", "byName: string"),
+        ("none", "none: boolean"),
+        ("named", "named: string"),
+        ("numbered", "numbered: integer"),
+    ];
+    for (needle, expected) in cases {
+        let (l, c) = pos(text, needle, 0);
+        let hover = client.hover_text(CLIENT, l, c);
+        assert!(hover.contains(expected), "{needle}: expected {expected:?} in {hover}");
+    }
+}
+
+#[test]
 fn hover_binds_generics_from_arguments_and_callbacks() {
     let mut client = Client::start(fixture_root());
     let text = "\

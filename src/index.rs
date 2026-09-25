@@ -43,6 +43,15 @@ pub struct Member {
     pub symbol: Symbol,
 }
 
+/// The entries of a table constructor that have no name: its array part (`key` is `integer`), or
+/// its `[key] = value` pairs.
+#[derive(Clone, Debug)]
+pub struct Element {
+    pub owner: SmolStr,
+    pub key: Type,
+    pub value: Type,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassDef {
     pub name: SmolStr,
@@ -84,6 +93,7 @@ pub struct EventDef {
 pub struct FileIndex {
     pub globals: Vec<Symbol>,
     pub members: Vec<Member>,
+    pub elements: Vec<Element>,
     pub classes: Vec<ClassDef>,
     pub aliases: Vec<AliasDef>,
     pub exports: Vec<Symbol>,
@@ -135,6 +145,7 @@ pub struct Index {
     pub resources: Vec<ResourceEntry>,
     globals: FxHashMap<SmolStr, Vec<Slot>>,
     members: FxHashMap<SmolStr, Vec<Slot>>,
+    elements: FxHashMap<SmolStr, Vec<Slot>>,
     classes: FxHashMap<SmolStr, Vec<Slot>>,
     aliases: FxHashMap<SmolStr, Vec<Slot>>,
 }
@@ -226,6 +237,9 @@ impl Index {
         for (i, member) in entry.index.members.iter().enumerate() {
             self.members.entry(member.owner.clone()).or_default().push((id, i as u32));
         }
+        for (i, element) in entry.index.elements.iter().enumerate() {
+            self.elements.entry(element.owner.clone()).or_default().push((id, i as u32));
+        }
         for (i, class) in entry.index.classes.iter().enumerate() {
             self.classes.entry(class.name.clone()).or_default().push((id, i as u32));
         }
@@ -244,6 +258,7 @@ impl Index {
         let Some(old) = self.files.get_mut(id as usize).and_then(Option::take) else { return };
         remove_file_slots(&mut self.globals, old.index.globals.iter().map(|s| &s.name), id);
         remove_file_slots(&mut self.members, old.index.members.iter().map(|m| &m.owner), id);
+        remove_file_slots(&mut self.elements, old.index.elements.iter().map(|e| &e.owner), id);
         remove_file_slots(&mut self.classes, old.index.classes.iter().map(|c| &c.name), id);
         remove_file_slots(&mut self.aliases, old.index.aliases.iter().map(|a| &a.name), id);
     }
@@ -321,8 +336,22 @@ impl Index {
     /// Members are looked up per resource rather than per file: libraries such as ox_lib load the
     /// files that extend their table lazily, so importing one file makes all of them reachable.
     pub fn members_of(&self, owner: &str, from: FileId) -> Vec<(FileId, &Symbol)> {
-        let Some(slots) = self.members.get(owner) else { return Vec::new() };
-        let resolve = |(file, i): &Slot| Some((*file, &self.file(*file)?.index.members.get(*i as usize)?.symbol));
+        self.owner_slots(self.members.get(owner), owner, from)
+            .into_iter()
+            .filter_map(|(file, i)| Some((file, &self.file(file)?.index.members.get(i as usize)?.symbol)))
+            .collect()
+    }
+
+    /// The array parts and `[key]` entries of the tables `owner` names, visible like its members.
+    pub fn elements_of(&self, owner: &str, from: FileId) -> Vec<&Element> {
+        self.owner_slots(self.elements.get(owner), owner, from)
+            .into_iter()
+            .filter_map(|(file, i)| self.file(file)?.index.elements.get(i as usize))
+            .collect()
+    }
+
+    fn owner_slots(&self, slots: Option<&Vec<Slot>>, owner: &str, from: FileId) -> Vec<Slot> {
+        let Some(slots) = slots else { return Vec::new() };
         let reachable = |target: FileId| {
             let sides_match = match (self.file(from).and_then(|f| f.side), self.file(target).and_then(|f| f.side)) {
                 (Some(a), Some(b)) => b.is_available_on(a),
@@ -336,7 +365,7 @@ impl Index {
         // `%`-owners name one specific table of one file (a local or a module return), so whoever
         // holds a value of that type may see all of it.
         if owner.starts_with('%') {
-            return slots.iter().filter_map(resolve).collect();
+            return slots.clone();
         }
         // A table the resource fills itself (`Config`, `Shared`) is its own; only tables that come
         // from an imported library (`lib`, `qbx`) are completed from that library's other files.
@@ -344,17 +373,17 @@ impl Index {
         let is_own = |target: FileId| {
             target == from || (own_resource.is_some() && self.file(target).and_then(|f| f.resource) == own_resource)
         };
-        let in_scope: Vec<&Slot> = slots.iter().filter(|(f, _)| self.is_visible(from, *f)).collect();
+        let in_scope: Vec<Slot> = slots.iter().copied().filter(|(f, _)| self.is_visible(from, *f)).collect();
         if in_scope.iter().any(|(f, _)| is_own(*f)) {
-            return in_scope.into_iter().filter_map(resolve).collect();
+            return in_scope;
         }
-        let visible: Vec<_> = slots.iter().filter(|(f, _)| reachable(*f)).filter_map(resolve).collect();
+        let visible: Vec<Slot> = slots.iter().copied().filter(|(f, _)| reachable(*f)).collect();
         // Classes travel between resources through exports and events, so their members are looked
         // up everywhere; plain tables of unrelated resources are not.
         if !visible.is_empty() || !self.classes.contains_key(owner) {
             return visible;
         }
-        slots.iter().filter_map(resolve).collect()
+        slots.clone()
     }
 
     fn imports_resource_of(&self, from: FileId, target: FileId) -> bool {
