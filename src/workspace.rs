@@ -198,6 +198,9 @@ impl Workspace {
 
     /// Indexes `path`, reading it from disk unless `text` (an open document) is given.
     pub fn index_path(&mut self, path: &Path, origin: FileOrigin, text: Option<&str>) -> bool {
+        if self.lint_config.is_excluded(path) {
+            return false;
+        }
         let owned;
         let source = match text {
             Some(text) => text,

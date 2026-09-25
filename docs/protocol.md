@@ -52,6 +52,10 @@ The server discovers `qbxlint.toml` from the first workspace root and its ancest
 request supplies indentation width and tabs/spaces. Diagnostic rule overrides from the client
 take precedence over the config file.
 
+Files matching the config's `exclude` patterns are never indexed or diagnosed, even while they are
+open. Files added to or removed from `exclude` leave or enter the index on the next `qbx/reindex`
+or restart.
+
 ## Client capabilities and file changes
 
 Snippet completions are sent only when

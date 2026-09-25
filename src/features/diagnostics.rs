@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString};
 use qbx_lua_analysis::lint::all_files;
 use qbx_lua_analysis::summary::summarize;
@@ -16,6 +18,10 @@ pub struct FixData {
     pub edits: Vec<(lsp_types::Range, String)>,
 }
 
+pub fn is_silenced(ws: &Workspace, path: &Path) -> bool {
+    ws.lint_config.is_excluded(path)
+}
+
 pub fn diagnostics(
     ws: &Workspace,
     doc: &Document,
@@ -23,7 +29,7 @@ pub fn diagnostics(
     crossrefs: &qbx_lua_analysis::crossref::CrossRefs,
 ) -> Vec<Diagnostic> {
     // Escrow-encrypted and binary files can still be opened in the editor; they are not Lua.
-    if qbx_lua_analysis::project::is_not_source(doc.text.as_bytes()) {
+    if qbx_lua_analysis::project::is_not_source(doc.text.as_bytes()) || is_silenced(ws, &doc.path) {
         return Vec::new();
     }
     let mut config = ws.lint_config.for_file(&doc.path);

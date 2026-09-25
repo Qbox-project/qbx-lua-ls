@@ -1052,6 +1052,60 @@ fn lua_ls_config_supplies_lint_settings_but_not_formatting() {
 }
 
 #[test]
+fn excluded_files_stay_out_of_the_index_and_diagnostics() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            if let (Ok(root), Ok(temp)) = (self.0.canonicalize(), std::env::temp_dir().canonicalize()) {
+                if root.parent() == Some(temp.as_path()) {
+                    let _ = std::fs::remove_dir_all(root);
+                }
+            }
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "qbx-ignore-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+    )));
+    let write = |relative: &str, text: &str| {
+        let path = fixture.0.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("qbxlint.toml", "exclude = ['skip/**']\n");
+    write("fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nclient_scripts { 'skip/*.lua', 'main.lua' }\n");
+    write("skip/old.lua", "SkippedApi = {}\nCitizen.Wait(0)\n");
+    write("main.lua", "print(SkippedApi)\n");
+    let mut client = Client::start(fixture.0.clone());
+    let undefined = |client: &mut Client| {
+        client.diagnostics_for("main.lua");
+        let list = client.diagnostics[&client.uri("main.lua").to_string()].as_array().unwrap().clone();
+        list.iter().map(|d| d["message"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+
+    let messages = undefined(&mut client);
+    assert!(messages.len() == 1 && messages[0].contains("SkippedApi"), "{messages:?}");
+    assert_eq!(client.diagnostics_for("skip/old.lua"), []);
+
+    client.open("skip/old.lua");
+    assert_eq!(client.diagnostics_for("skip/old.lua"), []);
+    assert_eq!(undefined(&mut client).len(), 1, "an open excluded file is not indexed");
+    client.notify("textDocument/didClose", json!({ "textDocument": { "uri": client.uri("skip/old.lua") } }));
+    assert_eq!(client.diagnostics_for("skip/old.lua"), [], "a closed excluded file stays out of the Problems panel");
+    assert_eq!(undefined(&mut client).len(), 1);
+
+    write("skip/new.lua", "NewApi = {}\nCitizen.Wait(0)\n");
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": client.uri("skip/new.lua"), "type": 1 }] }),
+    );
+    assert_eq!(client.diagnostics_for("skip/new.lua"), []);
+    let symbols = client.request("workspace/symbol", json!({ "query": "NewApi" }));
+    assert!(symbols.as_array().unwrap().is_empty(), "{symbols}");
+}
+
+#[test]
 fn server_cfg_start_order_settles_dependencies() {
     let mut client = Client::start(fixture_root());
     let late = client.diagnostics_for("late/server.lua");

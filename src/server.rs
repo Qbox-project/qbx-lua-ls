@@ -309,7 +309,7 @@ impl Server {
                 // A full scan reallocates file IDs, including the reserved slots for manifests.
                 doc.file = self.ws.index.allocate(&doc.path);
                 let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
-                if !doc.is_manifest() && is_source {
+                if !doc.is_manifest() && is_source && !self.ws.lint_config.is_excluded(&doc.path) {
                     doc.file =
                         self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
                 }
@@ -402,6 +402,9 @@ impl Server {
                 continue;
             }
             let Some(locale) = qbx_lua_analysis::locale::LocaleFile::load(&entry.root) else { continue };
+            if diagnostics::is_silenced(&self.ws, &locale.path) {
+                continue;
+            }
             let mut config = self.ws.lint_config.for_file(&locale.path);
             overrides.iter().for_each(|(code, level)| config.set(code, *level));
             let Some(severity) = config.severity(qbx_lua_analysis::rules::UNUSED_LOCALE_KEY) else { continue };
