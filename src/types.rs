@@ -286,11 +286,21 @@ pub struct TypeParser<'a> {
     src: &'a str,
     pos: usize,
     depth: u32,
+    /// Class and alias names with their byte offsets, collected only by `parse_names`.
+    names: Option<Vec<(usize, &'a str)>>,
 }
 
 impl<'a> TypeParser<'a> {
     pub fn new(src: &'a str) -> Self {
-        Self { src, pos: 0, depth: 0 }
+        Self { src, pos: 0, depth: 0, names: None }
+    }
+
+    /// Parses a type and returns the class and alias names in it with their byte offsets, leaving
+    /// out literals, built-in types and the names of fields and parameters.
+    pub fn parse_names(&mut self) -> Vec<(usize, &'a str)> {
+        self.names = Some(Vec::new());
+        self.parse();
+        self.names.take().unwrap_or_default()
     }
 
     pub fn rest(&self) -> &'a str {
@@ -451,6 +461,11 @@ impl<'a> TypeParser<'a> {
         };
         if name == "fun" && self.peek() == b'(' {
             return self.fun();
+        }
+        if let Some(names) = &mut self.names {
+            if matches!(Type::named(name), Type::Named(..)) {
+                names.push((self.pos - name.len(), name));
+            }
         }
         if self.peek() != b'<' {
             return Type::named(name);

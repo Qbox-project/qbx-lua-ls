@@ -69,6 +69,11 @@ pub fn definition(ws: &Workspace, doc: &Document, position: Position) -> Option<
         Some(Target::Member { info, .. }) => {
             info.location.and_then(|(file, range)| location(ws, file, range)).into_iter().collect()
         }
+        Some(Target::Type(name, _)) => {
+            let classes = ws.index.class_defs(&name).into_iter().map(|(file, class)| (file, class.range));
+            let aliases = ws.index.alias_defs(&name).into_iter().map(|(file, alias)| (file, alias.range));
+            classes.chain(aliases).filter_map(|(file, range)| location(ws, file, range)).collect()
+        }
         None => string_definition(ws, doc, offset),
     });
     (!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations))

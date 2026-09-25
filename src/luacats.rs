@@ -103,6 +103,16 @@ fn split_tag(line: &str) -> Option<(&str, &str)> {
     Some((&rest[..end], rest[end..].trim_start()))
 }
 
+/// Removes the `public`, `private`, `protected` and `package` keywords in front of a `@field` name.
+fn strip_visibility(mut rest: &str) -> &str {
+    for scope in ["public ", "private ", "protected ", "package "] {
+        if let Some(stripped) = rest.strip_prefix(scope) {
+            rest = stripped.trim_start();
+        }
+    }
+    rest
+}
+
 /// Parses the `---` lines of one contiguous doc comment; every line has its `---` prefix removed.
 pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
     let mut group = DocGroup::default();
@@ -231,12 +241,7 @@ pub fn parse_doc_lines(lines: &[&str]) -> DocGroup {
 
 fn parse_field(rest: &str, line: usize, group: &mut DocGroup) {
     let Some(class) = group.classes.last_mut() else { return };
-    let mut rest = rest;
-    for scope in ["public ", "private ", "protected ", "package "] {
-        if let Some(stripped) = rest.strip_prefix(scope) {
-            rest = stripped.trim_start();
-        }
-    }
+    let rest = strip_visibility(rest);
     if let Some(index) = rest.strip_prefix('[') {
         let mut parser = TypeParser::new(index);
         let key = parser.parse();
@@ -260,6 +265,107 @@ fn parse_field(rest: &str, line: usize, group: &mut DocGroup) {
         description: clean_description(parser.rest()),
         line,
     });
+}
+
+fn skip_name(rest: &str) -> Option<&str> {
+    let mut parser = TypeParser::new(rest);
+    parser.ident()?;
+    Some(parser.rest())
+}
+
+/// Collects the class and alias names of one doc line. Every `rest` passed in is a suffix of
+/// `line`, so it starts at `line.len() - rest.len()`.
+struct TypeNames<'a> {
+    line: &'a str,
+    found: Vec<(usize, &'a str)>,
+}
+
+impl<'a> TypeNames<'a> {
+    /// Records the name a `@class`, `@alias` or `@enum` declares and returns the text after it.
+    fn declared(&mut self, rest: &'a str) -> Option<&'a str> {
+        let mut parser = TypeParser::new(rest);
+        let name = parser.ident()?;
+        self.found.push((self.line.len() - parser.rest().len() - name.len(), name));
+        Some(parser.rest())
+    }
+
+    /// Records the names in the type `rest` starts with and returns the text after it.
+    fn ty(&mut self, rest: &'a str) -> &'a str {
+        let start = self.line.len() - rest.len();
+        let mut parser = TypeParser::new(rest);
+        self.found.extend(parser.parse_names().into_iter().map(|(offset, name)| (start + offset, name)));
+        parser.rest()
+    }
+
+    fn types(&mut self, rest: &'a str) {
+        self.list(rest, |names, rest| Some(names.ty(rest)));
+    }
+
+    /// Walks a comma separated list, where `item` reads one entry and returns the text after it.
+    fn list(&mut self, rest: &'a str, item: impl Fn(&mut Self, &'a str) -> Option<&'a str>) {
+        let mut next = Some(rest);
+        while let Some(after) = next.and_then(|rest| item(self, rest.trim_start())) {
+            next = after.trim_start().strip_prefix(',');
+        }
+    }
+}
+
+/// The class or alias name at byte `offset` of a doc line whose `---` prefix is removed, with the
+/// byte it starts at. Parameter, field and return names, literals and built-in types do not count.
+pub fn type_name_at(line: &str, offset: usize) -> Option<(usize, &str)> {
+    let (tag, rest) = match line.trim_start().strip_prefix('|') {
+        Some(member) => ("|", member.trim_start_matches(['>', '+', ' '])),
+        None => split_tag(line)?,
+    };
+    let mut names = TypeNames { line, found: Vec::new() };
+    match tag {
+        "class" => {
+            let rest = rest.strip_prefix("(exact)").map_or(rest, str::trim_start);
+            names.declared(rest);
+            // Parsing the head as a type skips generic parameters such as the `T` of `Child<T>`.
+            let mut head = TypeParser::new(rest);
+            head.parse();
+            if let Some(parents) = head.rest().trim_start().strip_prefix(':') {
+                names.types(parents);
+            }
+        }
+        "alias" | "enum" => {
+            if let Some(rest) = names.declared(rest) {
+                names.types(rest);
+            }
+        }
+        "param" => {
+            if let Some(rest) = rest.strip_prefix("...").or_else(|| skip_name(rest)) {
+                names.types(rest.trim_start_matches('?'));
+            }
+        }
+        "field" => {
+            let rest = strip_visibility(rest);
+            let value = match rest.strip_prefix('[') {
+                Some(key) => names.ty(key).trim_start().strip_prefix(']'),
+                None => skip_name(rest),
+            };
+            if let Some(value) = value {
+                names.types(value.trim_start_matches('?'));
+            }
+        }
+        "cast" => {
+            if let Some(rest) = skip_name(rest) {
+                names.list(rest, |names, rest| Some(names.ty(rest.trim_start_matches(['+', '-']))));
+            }
+        }
+        "return" => names.list(rest, |names, rest| {
+            let after = names.ty(rest);
+            Some(skip_name(after).unwrap_or(after))
+        }),
+        "generic" => names.list(rest, |names, rest| {
+            let rest = skip_name(rest)?.trim_start();
+            Some(rest.strip_prefix(':').map_or(rest, |constraint| names.ty(constraint)))
+        }),
+        "type" | "overload" | "vararg" | "as" | "|" => names.types(rest),
+        _ => {}
+    }
+    names.found.into_iter().find(|(start, name)| (*start..=start + name.len()).contains(&offset))
 }
 
 #[cfg(test)]
@@ -325,5 +431,72 @@ mod tests {
         let doc = parse("---@generic T: table, K\n---@type table<string, fun(): boolean>");
         assert_eq!(doc.generics, ["T", "K"]);
         assert_eq!(doc.ty.unwrap().to_string(), "table<string, fun(): boolean>");
+    }
+
+    #[test]
+    fn finds_type_names_in_annotations() {
+        for line in [
+            "@type Gar^age",
+            "@type Garage^",
+            "@type string, Gar^age",
+            "@type (string|Gar^age)[]?",
+            "@type table<string, Gar^age>",
+            "@type fun(value: Gar^age): boolean",
+            "@type fun(): Gar^age",
+            "@type { value: Gar^age }",
+            "@type { [Gar^age]: boolean }",
+            "@type [string, Gar^age]",
+            "@param value? Gar^age",
+            "@param ... Gar^age",
+            "@return string, Gar^age",
+            "@return string name, Gar^age value",
+            "@field private value? Gar^age",
+            "@field [Gar^age] string",
+            "@field ['value'] Gar^age",
+            "@class Gar^age",
+            "@class (exact) Child<T>: Parent, Gar^age",
+            "@alias Gar^age string",
+            "@alias Value Gar^age",
+            "| > Gar^age # description",
+            "@enum Gar^age",
+            "@overload fun(): Gar^age",
+            "@generic T, U: table<string, Gar^age>",
+            "@generic T: string, U: Gar^age",
+            "@cast value +string, -Gar^age",
+            "@vararg Gar^age",
+            "@as Gar^age",
+        ] {
+            let offset = line.find('^').unwrap();
+            let text = line.replace('^', "");
+            assert_eq!(type_name_at(&text, offset), Some((text.find("Garage").unwrap(), "Garage")), "{line}");
+        }
+        let line = "@type Garage.Point[]";
+        assert_eq!(type_name_at(line, line.find("Point").unwrap()), Some((6, "Garage.Point")));
+    }
+
+    #[test]
+    fn ignores_non_type_names_in_annotations() {
+        for line in [
+            "A Gar^age in the description",
+            "@pa^ram value Garage",
+            "@param Gar^age string",
+            "@field Gar^age string",
+            "@field ['Gar^age'] string",
+            "@field public^ value Garage",
+            "@return string Gar^age",
+            "@type string # Gar^age",
+            "@type string Gar^age",
+            "@type 'Gar^age'",
+            "@type fun(Gar^age: string): boolean",
+            "@type { Gar^age: string }",
+            "@type str^ing",
+            "@generic Gar^age: string",
+            "@class Child<Gar^age>: Parent",
+            "@cast Gar^age string",
+            "@see Gar^age",
+        ] {
+            let offset = line.find('^').unwrap();
+            assert_eq!(type_name_at(&line.replace('^', ""), offset), None, "{line}");
+        }
     }
 }

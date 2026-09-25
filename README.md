@@ -14,6 +14,7 @@ Available features depend on the editor's LSP client.
 - Completion and hover for Lua symbols, FiveM natives, exports, events and callbacks.
 - Definitions, references and rename for locals, globals and fields, including static string
   keys such as `Config['name']` and supported `---@field` declarations.
+- Hover and definitions for the classes, aliases and enums named in LuaCATS annotations.
 - Diagnostics and quick fixes with resource and client/server context.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
 - Whole-document formatting, configured through `qbxlint.toml`.
