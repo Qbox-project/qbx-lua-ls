@@ -389,6 +389,9 @@ pub fn type_name_at(line: &str, offset: usize) -> Option<(usize, &str)> {
             let rest = skip_name(rest)?.trim_start();
             Some(rest.strip_prefix(':').map_or(rest, |constraint| names.ty(constraint)))
         }),
+        "see" => {
+            names.ty(rest);
+        }
         "type" | "overload" | "vararg" | "as" | "|" => names.types(rest),
         _ => {}
     }
@@ -510,6 +513,8 @@ mod tests {
             "@cast value +string, -Gar^age",
             "@vararg Gar^age",
             "@as Gar^age",
+            "@see Gar^age",
+            "@see Gar^age for details",
         ] {
             let offset = line.find('^').unwrap();
             let text = line.replace('^', "");
@@ -541,7 +546,7 @@ mod tests {
             "@enum (Gar^age) Mode",
             "@cast Gar^age string",
             "@operator Gar^age(number): string",
-            "@see Gar^age",
+            "@see string, see Gar^age",
         ] {
             let offset = line.find('^').unwrap();
             assert_eq!(type_name_at(&line.replace('^', ""), offset), None, "{line}");

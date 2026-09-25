@@ -440,6 +440,7 @@ fn annotation_definitions_and_hovers_use_closed_files() {
         ("---@return Garage garage, GarageKind kind", "GarageKind", 5),
         ("---@overload fun(point: GaragePoint): Garage", "Garage", 36),
         ("---@operator add(GaragePoint): Garage", "GaragePoint", 0),
+        ("---@see Garage", "Garage", 36),
         ("local garage = {} --[[@as Garage]]", "Garage", 36),
     ];
     let text = annotations.iter().map(|(line, ..)| *line).collect::<Vec<_>>().join("\n");
