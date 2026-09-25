@@ -391,12 +391,7 @@ impl<'a> TypeParser<'a> {
             b'{' => self.shape(),
             b'[' => {
                 self.pos += 1;
-                let mut items = Vec::new();
-                while !self.eat(b']') && self.pos < self.src.len() {
-                    items.push(self.parse());
-                    self.eat(b',');
-                }
-                Type::Tuple(items)
+                Type::Tuple(self.list_until(b']'))
             }
             quote @ (b'"' | b'\'') => {
                 self.pos += 1;
@@ -431,6 +426,21 @@ impl<'a> TypeParser<'a> {
         }
     }
 
+    fn list_until(&mut self, close: u8) -> Vec<Type> {
+        let mut items = Vec::new();
+        while !self.eat(close) && self.pos < self.src.len() {
+            let before = self.pos;
+            let ty = self.parse();
+            // A byte no type can start with, like the stray `}` in `table<string, {}}>`, would be retried forever.
+            if self.pos == before {
+                break;
+            }
+            items.push(ty);
+            self.eat(b',');
+        }
+        items
+    }
+
     fn ident_follows(&self) -> bool {
         matches!(self.peek(), b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'{' | b'(')
     }
@@ -446,11 +456,7 @@ impl<'a> TypeParser<'a> {
             return Type::named(name);
         }
         self.pos += 1;
-        let mut args = Vec::new();
-        while !self.eat(b'>') && self.pos < self.src.len() {
-            args.push(self.parse());
-            self.eat(b',');
-        }
+        let mut args = self.list_until(b'>');
         match (name, args.len()) {
             ("table", 2) => {
                 let value = args.pop().unwrap_or_default();
@@ -581,7 +587,19 @@ mod tests {
 
     #[test]
     fn malformed_types_do_not_hang() {
-        for text in ["fun(", "{ a: ", "table<", "[", "((((", "fun(a: fun(b: fun(", "|||", ""] {
+        for text in [
+            "fun(",
+            "{ a: ",
+            "table<",
+            "[",
+            "((((",
+            "fun(a: fun(b: fun(",
+            "|||",
+            "",
+            "table<}>",
+            "[}]",
+            "table<string, {}}>",
+        ] {
             let _ = parse_type(text);
         }
     }

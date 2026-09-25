@@ -313,6 +313,14 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_descriptions_inside_field_types() {
+        let doc = parse(
+            "---@class Config.Bleeding\n---@field items table<string, {value: number [how much], anim: table {dict: string [dictionary]}}> [items]",
+        );
+        assert_eq!(doc.classes[0].fields[0].name, "items");
+    }
+
+    #[test]
     fn type_and_generics() {
         let doc = parse("---@generic T: table, K\n---@type table<string, fun(): boolean>");
         assert_eq!(doc.generics, ["T", "K"]);
