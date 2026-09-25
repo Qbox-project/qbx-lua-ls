@@ -19,7 +19,7 @@ pub struct FixData {
 }
 
 pub fn is_silenced(ws: &Workspace, path: &Path) -> bool {
-    ws.lint_config.is_excluded(path)
+    ws.lint_config.is_excluded(path) || ws.lint_config.ignores_diagnostics(path)
 }
 
 pub fn diagnostics(

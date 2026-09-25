@@ -53,8 +53,10 @@ request supplies indentation width and tabs/spaces. Diagnostic rule overrides fr
 take precedence over the config file.
 
 Files matching the config's `exclude` patterns are never indexed or diagnosed, even while they are
-open. Files added to or removed from `exclude` leave or enter the index on the next `qbx/reindex`
-or restart.
+open. Files matching `ignore_diagnostics` are indexed like any other file, so definitions, hover
+and completion still reach their symbols, but the server publishes no diagnostics for them.
+`ignore_diagnostics` changes apply once the client reports the saved config file. Files added to
+or removed from `exclude` leave or enter the index on the next `qbx/reindex` or restart.
 
 ## Client capabilities and file changes
 

@@ -1052,7 +1052,7 @@ fn lua_ls_config_supplies_lint_settings_but_not_formatting() {
 }
 
 #[test]
-fn excluded_files_stay_out_of_the_index_and_diagnostics() {
+fn excluded_files_stay_out_and_ignored_files_stay_quiet() {
     struct Fixture(PathBuf);
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -1073,10 +1073,14 @@ fn excluded_files_stay_out_of_the_index_and_diagnostics() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     };
-    write("qbxlint.toml", "exclude = ['skip/**']\n");
-    write("fxmanifest.lua", "fx_version 'cerulean'\ngame 'gta5'\nclient_scripts { 'skip/*.lua', 'main.lua' }\n");
+    write("qbxlint.toml", "exclude = ['skip/**']\nignore_diagnostics = ['vendor/']\n");
+    write(
+        "fxmanifest.lua",
+        "fx_version 'cerulean'\ngame 'gta5'\nclient_scripts { 'vendor/*.lua', 'skip/*.lua', 'main.lua' }\n",
+    );
+    write("vendor/lib.lua", "VendorApi = {}\nCitizen.Wait(0)\n");
     write("skip/old.lua", "SkippedApi = {}\nCitizen.Wait(0)\n");
-    write("main.lua", "print(SkippedApi)\n");
+    write("main.lua", "print(VendorApi, SkippedApi)\n");
     let mut client = Client::start(fixture.0.clone());
     let undefined = |client: &mut Client| {
         client.diagnostics_for("main.lua");
@@ -1086,8 +1090,13 @@ fn excluded_files_stay_out_of_the_index_and_diagnostics() {
 
     let messages = undefined(&mut client);
     assert!(messages.len() == 1 && messages[0].contains("SkippedApi"), "{messages:?}");
+    assert_eq!(client.diagnostics_for("vendor/lib.lua"), []);
     assert_eq!(client.diagnostics_for("skip/old.lua"), []);
+    let symbols = client.request("workspace/symbol", json!({ "query": "VendorApi" }));
+    assert!(!symbols.as_array().unwrap().is_empty(), "ignored files are still indexed: {symbols}");
 
+    client.open("vendor/lib.lua");
+    assert_eq!(client.diagnostics_for("vendor/lib.lua"), []);
     client.open("skip/old.lua");
     assert_eq!(client.diagnostics_for("skip/old.lua"), []);
     assert_eq!(undefined(&mut client).len(), 1, "an open excluded file is not indexed");
