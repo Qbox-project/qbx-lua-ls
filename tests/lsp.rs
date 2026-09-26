@@ -104,6 +104,25 @@ impl Client {
         }
     }
 
+    fn request_error(&mut self, method: &str, params: Value) -> lsp_server::ResponseError {
+        self.next_id += 1;
+        let id = RequestId::from(self.next_id);
+        self.connection
+            .sender
+            .send(Message::Request(Request { id: id.clone(), method: method.into(), params }))
+            .unwrap();
+        loop {
+            let message =
+                self.connection.receiver.recv_timeout(Duration::from_secs(20)).expect("server did not answer");
+            if let Message::Response(response) = &message {
+                if response.id == id {
+                    return response.error.clone().expect("expected request validation error");
+                }
+            }
+            self.handle_incoming(message);
+        }
+    }
+
     fn uri(&self, relative: &str) -> Url {
         Url::from_file_path(self.root.join(relative)).unwrap()
     }
@@ -188,6 +207,207 @@ const CLIENT: &str = "myresource/client/main.lua";
 const SERVER: &str = "myresource/server/main.lua";
 
 #[test]
+fn reference_search_is_offline_paginated_and_available_without_open_documents() {
+    let mut client = Client::start_with_capabilities(fixture_root(), json!({}));
+    let before = client.request("qbx/status", Value::Null);
+    let first = client.request("qbx/referenceSearch", Value::Null);
+    assert_eq!(first["items"].as_array().unwrap().len(), 50);
+    assert_eq!(first["offset"], 0);
+    assert_eq!(first["limit"], 50);
+    assert!(first["total"].as_u64().unwrap() > 7000);
+    let namespaces = first["namespaces"].as_array().unwrap();
+    assert!(namespaces.iter().any(|value| value == "PAD"));
+    assert!(namespaces.windows(2).all(|pair| pair[0].as_str() < pair[1].as_str()));
+    assert!(first["items"].as_array().unwrap().iter().all(|item| item.get("documentation").is_none()));
+    assert_eq!(first, client.request("qbx/referenceSearch", json!({})), "default search order is deterministic");
+    let second = client.request("qbx/referenceSearch", json!({ "offset": 50 }));
+    let first_ids: Vec<_> = first["items"].as_array().unwrap().iter().map(|item| &item["id"]).collect();
+    assert!(second["items"].as_array().unwrap().iter().all(|item| !first_ids.contains(&&item["id"])));
+    let capped = client.request("qbx/referenceSearch", json!({ "limit": 1000000 }));
+    assert_eq!(capped["items"].as_array().unwrap().len(), 100);
+    assert_eq!(capped["limit"], 100);
+    let minimum = client.request("qbx/referenceSearch", json!({ "limit": 0 }));
+    assert_eq!(minimum["limit"], 1);
+    assert_eq!(minimum["items"].as_array().unwrap().len(), 1);
+    let past_end = client.request("qbx/referenceSearch", json!({ "offset": u64::MAX }));
+    assert!(past_end["items"].as_array().unwrap().is_empty());
+    assert_eq!(past_end["offset"], past_end["total"]);
+    let after = client.request("qbx/status", Value::Null);
+    assert_eq!(before, after, "reference requests do not open files or change the workspace index");
+}
+
+#[test]
+fn reference_search_matches_names_hashes_aliases_ids_and_default_bindings() {
+    let mut client = Client::start(fixture_root());
+    for (query, kind, expected) in [
+        ("GetEntityCoords", "native", "native:GetEntityCoords"),
+        ("gEtEnTiTyCoOrDs", "native", "native:GetEntityCoords"),
+        ("SET_PED_CONFIG_FLAG", "native", "native:SetPedConfigFlag"),
+        ("0x3FEF770D40960D5A", "native", "native:GetEntityCoords"),
+        ("3fef770d40960d5a", "native", "native:GetEntityCoords"),
+        ("N_0x580417101DDB492F", "native", "native:IsControlJustPressed"),
+        ("N_0xe8a25867fba3b05e", "native", "native:SetControlNormal"),
+        ("GetLastInputMethod", "native", "native:IsUsingKeyboard"),
+        ("38", "control", "control:38"),
+        ("input_pickup", "control", "control:38"),
+        ("input pickup", "control", "control:38"),
+        ("pickup e", "control", "control:38"),
+        ("51 DPAD RIGHT", "control", "control:51"),
+        ("48", "pedFlag", "pedFlag:48"),
+        ("BlockWeaponSwitching", "pedFlag", "pedFlag:48"),
+    ] {
+        let result = client.request("qbx/referenceSearch", json!({ "query": query, "kind": kind }));
+        assert_eq!(result["items"][0]["id"], expected, "{query}: {result}");
+    }
+    let result = client.request("qbx/referenceSearch", json!({ "query": "38" }));
+    assert_eq!(result["items"][0]["id"], "control:38", "exact IDs outrank substrings in hashes");
+    assert_eq!(result["items"][1]["id"], "pedFlag:38");
+    let result = client.request("qbx/referenceSearch", json!({ "query": "IsControl", "kind": "native" }));
+    assert!(result["items"][0]["name"].as_str().unwrap().starts_with("IsControl"));
+    let result = client.request("qbx/referenceSearch", json!({ "query": "not-a-real-native-or-control" }));
+    assert_eq!(result["total"], 0);
+    assert!(result["items"].as_array().unwrap().is_empty());
+    let result = client.request("qbx/referenceSearch", json!({ "kind": "native" }));
+    let canonical_count = qbx_fivem_data::natives().filter(|native| native.alias_of.is_none()).count();
+    assert_eq!(result["total"], canonical_count, "default listings deduplicate documented aliases");
+}
+
+#[test]
+fn reference_search_filters_side_namespace_and_catalog_without_conflating_them() {
+    let mut client = Client::start(fixture_root());
+    for side in ["client", "server", "shared"] {
+        let result = client.request("qbx/referenceSearch", json!({ "side": side, "limit": 100 }));
+        assert!(result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["side"] == side || side != "shared" && item["side"] == "shared"));
+        let shared = client
+            .request("qbx/referenceSearch", json!({ "query": "GetEntityCoords", "side": side, "kind": "native" }));
+        assert_eq!(shared["items"][0]["id"], "native:GetEntityCoords", "shared native remains available on {side}");
+    }
+    let result =
+        client.request("qbx/referenceSearch", json!({ "kind": "native", "namespace": "pad", "side": "server" }));
+    assert_eq!(result["total"], 0, "PAD natives are client-only");
+    let result = client.request("qbx/referenceSearch", json!({ "kind": "native", "namespace": "PAD", "limit": 100 }));
+    assert!(result["total"].as_u64().unwrap() > 20);
+    assert!(result["items"].as_array().unwrap().iter().all(|item| item["namespace"] == "PAD"));
+    let all = client.request("qbx/referenceSearch", json!({ "namespace": "PAD" }));
+    assert_eq!(
+        all["total"].as_u64().unwrap(),
+        result["total"].as_u64().unwrap()
+            + qbx_fivem_data::controls().count() as u64
+            + qbx_fivem_data::ped_config_flags().count() as u64,
+        "all-catalog search retains numeric catalogs when filtering native namespace"
+    );
+    for (kind, count) in
+        [("control", qbx_fivem_data::controls().count()), ("pedFlag", qbx_fivem_data::ped_config_flags().count())]
+    {
+        let result = client.request("qbx/referenceSearch", json!({ "kind": kind, "namespace": "PED" }));
+        assert_eq!(result["total"], count, "native namespace filters do not hide other catalogs");
+        assert!(result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == kind && item["side"] == "client" && item.get("namespace").is_none()));
+        let result = client.request("qbx/referenceSearch", json!({ "kind": kind, "side": "server" }));
+        assert_eq!(result["total"], 0);
+    }
+}
+
+#[test]
+fn reference_details_return_documentation_and_safe_lua_insertion_text() {
+    let mut client = Client::start(fixture_root());
+    let detail = client.request("qbx/referenceDetail", json!({ "id": "native:GetEntityCoords" }));
+    assert_eq!(detail["id"], "native:GetEntityCoords");
+    assert_eq!(detail["kind"], "native");
+    assert_eq!(detail["side"], "shared");
+    assert_eq!(detail["namespace"], "ENTITY");
+    assert_eq!(detail["hash"], "0x3FEF770D40960D5A");
+    assert_eq!(detail["signature"], "function GetEntityCoords(entity: Entity, alive: boolean): vector3");
+    assert_eq!(
+        detail["parameters"],
+        json!([{ "name": "entity", "type": "Entity" }, { "name": "alive", "type": "boolean" }])
+    );
+    assert_eq!(detail["returns"], json!(["vector3"]));
+    assert!(!detail["documentation"].as_str().unwrap().is_empty());
+    assert_eq!(detail["sourceUrl"], "https://docs.fivem.net/natives/?_0x3FEF770D40960D5A");
+    assert_eq!(detail["copyText"], "GetEntityCoords");
+    assert_eq!(detail["insertText"], "GetEntityCoords(entity, alive)");
+    assert_eq!(detail["insertSnippet"], "GetEntityCoords(${1:entity}, ${2:alive})$0");
+    let alias = client.request("qbx/referenceDetail", json!({ "id": "native:GetLastInputMethod" }));
+    assert_eq!(alias["id"], "native:IsUsingKeyboard");
+    let hash = client.request("qbx/referenceDetail", json!({ "id": "native:N_0x580417101DDB492F" }));
+    assert_eq!(hash["id"], "native:IsControlJustPressed");
+    let no_args = client.request("qbx/referenceDetail", json!({ "id": "native:PlayerPedId" }));
+    assert_eq!(no_args["insertText"], "PlayerPedId()");
+    assert_eq!(no_args["insertSnippet"], "PlayerPedId()$0");
+
+    for (id, expected) in [
+        ("control:38", "INPUT_PICKUP"),
+        ("control:243", "`` ~ / ` ``"),
+        ("control:360", "Not documented"),
+        ("pedFlag:48", "CPED_CONFIG_FLAG_BlockWeaponSwitching"),
+    ] {
+        let detail = client.request("qbx/referenceDetail", json!({ "id": id }));
+        assert_eq!(detail["id"], id);
+        assert!(detail["documentation"].as_str().unwrap().contains(expected), "{detail}");
+        let number = id.split_once(':').unwrap().1;
+        assert_eq!(detail["copyText"], number);
+        assert_eq!(detail["insertText"], number);
+        assert!(detail.get("insertSnippet").is_none());
+        assert!(detail.get("signature").is_none());
+        if id.starts_with("pedFlag:") {
+            assert!(detail["documentation"].as_str().unwrap().contains("Behavior is not documented"));
+            assert!(detail["documentation"].as_str().unwrap().contains("potential names and hash collisions"));
+        }
+    }
+    for id in [
+        "unknown:1",
+        "native:MissingNative",
+        "native:PED",
+        "control:9999",
+        "control:-1",
+        "control:038",
+        "pedFlag:4294967296",
+        "",
+        "control:38:other",
+    ] {
+        assert_eq!(client.request("qbx/referenceDetail", json!({ "id": id })), Value::Null, "{id}");
+    }
+}
+
+#[test]
+fn reference_requests_reject_invalid_params_without_disrupting_lsp() {
+    let mut client = Client::start(fixture_root());
+    for params in [
+        json!({ "query": "a".repeat(257) }),
+        json!({ "namespace": "a".repeat(65) }),
+        json!({ "offset": -1 }),
+        json!({ "offset": 0.5 }),
+        json!({ "limit": -1 }),
+        json!({ "kind": "invalid" }),
+        json!({ "side": "invalid" }),
+        json!({ "query": 38 }),
+        json!([]),
+    ] {
+        let error = client.request_error("qbx/referenceSearch", params);
+        assert_eq!(error.code, -32602);
+    }
+    for params in
+        [json!({ "id": "a".repeat(513) }), json!({ "id": 38 }), Value::Null, json!(["native:GetEntityCoords"])]
+    {
+        let error = client.request_error("qbx/referenceDetail", params);
+        assert_eq!(error.code, -32602);
+    }
+    let text = "IsControlJustPressed(0, 38)";
+    client.open_with(CLIENT, text);
+    let (line, character) = pos(text, "38", 0);
+    assert!(client.hover_text(CLIENT, line, character).contains("INPUT_PICKUP"));
+    assert!(client.request("qbx/status", Value::Null)["natives"].as_u64().unwrap() > 7000);
+}
+
+#[test]
 fn indexes_the_workspace_and_reports_status() {
     let mut client = Client::start(fixture_root());
     let status = client.request("qbx/status", Value::Null);
@@ -236,6 +456,235 @@ fn hover_shows_types_docs_and_natives() {
 
     let (l, c) = pos(&text, "Config.Garages.legion.label", 23);
     assert!(client.hover_text(CLIENT, l, c).contains("label: string"));
+}
+
+#[test]
+fn native_argument_hovers_show_defaults_flags_and_exact_ranges() {
+    // Numeric hovers also work for clients that advertise no optional hover capabilities.
+    for capabilities in [json!({}), json!({ "textDocument": { "hover": { "contentFormat": ["markdown"] } } })] {
+        let mut client = Client::start_with_capabilities(fixture_root(), capabilities);
+        let text = "IsControlJustPressed(0, 38)\nSetPedConfigFlag(PlayerPedId(), 48, true)\nGetControlNormal(0, 360)\nGetControlNormal(0, 3)\nGetControlNormal(0, 243)\n";
+        client.open_with(CLIENT, text);
+        for (literal, symbol) in [("38", "INPUT_PICKUP"), ("48", "CPED_CONFIG_FLAG_BlockWeaponSwitching")] {
+            let (line, character) = pos(text, literal, 0);
+            let hover = client.request("textDocument/hover", client.position_params(CLIENT, line, character));
+            let content = hover["contents"]["value"].as_str().unwrap();
+            assert!(content.contains(symbol), "{content}");
+            assert!(content.contains("https://"), "reference should link its source: {content}");
+            assert_eq!(hover["contents"]["kind"], "markdown");
+            assert_eq!(
+                hover["range"],
+                json!({
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character + 2 }
+                })
+            );
+            if literal == "38" {
+                assert!(content.contains("Default keyboard (QWERTY): `E`"), "{content}");
+                assert!(content.contains("Default Xbox controller: `LB`"), "{content}");
+                assert!(content.contains("remapped"), "{content}");
+            } else {
+                assert!(content.contains("Behavior is not documented"), "do not infer behavior from a name: {content}");
+                assert!(content.contains("potential names and hash collisions"), "{content}");
+            }
+            // Hovering the comma/space after a literal must not inherit its enum documentation.
+            assert!(client.hover_text(CLIENT, line, character + 2).is_empty());
+        }
+        let hover = client.hover_text(CLIENT, 0, 3);
+        assert!(hover.contains("function IsControlJustPressed"), "ordinary native hover is preserved: {hover}");
+        let (line, character) = pos(text, "360", 0);
+        let hover = client.hover_text(CLIENT, line, character);
+        assert!(hover.contains("INPUT_HUDMARKER_SELECT"), "{hover}");
+        assert!(hover.contains("Default keyboard (QWERTY): Not documented"), "{hover}");
+        assert!(hover.contains("Default Xbox controller: Not documented"), "{hover}");
+        let (line, character) = pos(text, ", 3)", 2);
+        let hover = client.hover_text(CLIENT, line, character);
+        assert!(hover.contains("Default keyboard (QWERTY): `(NONE)`"), "explicit unbound values stay intact: {hover}");
+        let (line, character) = pos(text, "243", 0);
+        let hover = client.hover_text(CLIENT, line, character);
+        assert!(
+            hover.contains("Default keyboard (QWERTY): `` ~ / ` ``"),
+            "backtick keys must remain valid Markdown: {hover}"
+        );
+    }
+}
+
+#[test]
+fn native_argument_hovers_cover_control_variants_hashes_and_numeric_literals() {
+    let mut client = Client::start(fixture_root());
+    let cases = [
+        ("IsControlEnabled(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsControlJustReleased(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsControlPressed(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsControlReleased(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsDisabledControlJustPressed(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsDisabledControlJustReleased(0, 51)", "51", "INPUT_CONTEXT"),
+        ("IsDisabledControlPressed(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsDisabledControlReleased(0, 38)", "38", "INPUT_PICKUP"),
+        ("GetControlValue(0, 38)", "38", "INPUT_PICKUP"),
+        ("GetControlNormal(2, 0)", "0", "INPUT_NEXT_CAMERA"),
+        ("GetControlUnboundNormal(0, 38)", "38", "INPUT_PICKUP"),
+        ("GetDisabledControlNormal(0, 38)", "38", "INPUT_PICKUP"),
+        ("GetDisabledControlUnboundNormal(0, 38)", "38", "INPUT_PICKUP"),
+        ("GetControlInstructionalButton(0, 38, true)", "38", "INPUT_PICKUP"),
+        ("DisableControlAction(0, 38, true)", "38", "INPUT_PICKUP"),
+        ("EnableControlAction(0, 38, true)", "38", "INPUT_PICKUP"),
+        ("SetControlNormal(0, 38, 0.5)", "38", "INPUT_PICKUP"),
+        ("SetInputExclusive(0, 38)", "38", "INPUT_PICKUP"),
+        ("IsControlJustPressed(0, 0X26)", "0X26", "INPUT_PICKUP"),
+        ("IsControlJustPressed(0, 38.0)", "38.0", "INPUT_PICKUP"),
+        ("IsControlJustPressed(0, 3.8e1)", "3.8e1", "INPUT_PICKUP"),
+        ("IsControlJustPressed(0, 0x26p0)", "0x26p0", "INPUT_PICKUP"),
+        ("N_0xe8a25867fba3b05e(0, 38, 0.5)", "38", "INPUT_PICKUP"),
+        ("N_0x580417101DDB492F(0, 0x26)", "0x26", "INPUT_PICKUP"),
+        ("GetPedConfigFlag(PlayerPedId(), 32, true)", "32", "CPED_CONFIG_FLAG_WillFlyThroughWindscreen"),
+        ("N_0x1913FE4CBF41C463(PlayerPedId(), 0x30, true)", "0x30", "CPED_CONFIG_FLAG_BlockWeaponSwitching"),
+        ("N_0x7ee53118c892b513(PlayerPedId(), 48, true)", "48", "CPED_CONFIG_FLAG_BlockWeaponSwitching"),
+    ];
+    client.open_with(CLIENT, cases[0].0);
+    for (version, (text, literal, symbol)) in cases.into_iter().enumerate() {
+        client.change(CLIENT, version as i32 + 2, text);
+        let (line, character) = pos(text, literal, 0);
+        let hover = client.request("textDocument/hover", client.position_params(CLIENT, line, character));
+        assert!(hover["contents"]["value"].as_str().unwrap_or_default().contains(symbol), "{text}: {hover}");
+        assert_eq!(hover["range"]["start"]["character"], character, "{text}: {hover}");
+        assert_eq!(hover["range"]["end"]["character"], character + literal.len() as u32, "{text}: {hover}");
+    }
+}
+
+#[test]
+fn native_argument_hovers_respect_ast_nesting_comments_and_argument_positions() {
+    let mut client = Client::start(fixture_root());
+    let text = "\
+local label = 'é🎮'; Consume(IsControlJustPressed(0, 38))
+SetPedConfigFlag(
+    GetPed(48), -- a nested number is not a flag
+    ( -- flag 48 in a comment is not a literal
+      0x30 -- end of actual flag
+    ),
+    true
+)
+IsControlJustPressed(38, 51)
+GetControlGroupInstructionalButton(0, 38, true)
+SetControlGroupColor(0, 38, 0, 0)
+SetPedResetFlag(PlayerPedId(), 48, true)
+SetControlNormal(0, 38, 51)
+GetPedConfigFlag(32, 48, 32)
+";
+    client.open_with(CLIENT, text);
+    // LSP ranges use UTF-16, including when non-ASCII text precedes the number.
+    let first_line = text.lines().next().unwrap();
+    let offset = first_line.find("38").unwrap();
+    let character = first_line[..offset].encode_utf16().count() as u32;
+    let hover = client.request("textDocument/hover", client.position_params(CLIENT, 0, character));
+    assert!(hover["contents"]["value"].as_str().unwrap().contains("INPUT_PICKUP"), "{hover}");
+    assert_eq!(
+        hover["range"],
+        json!({
+            "start": { "line": 0, "character": character },
+            "end": { "line": 0, "character": character + 2 }
+        })
+    );
+    let (line, character) = pos(text, "0x30", 0);
+    let hover = client.request("textDocument/hover", client.position_params(CLIENT, line, character));
+    assert!(hover["contents"]["value"].as_str().unwrap().contains("CPED_CONFIG_FLAG_BlockWeaponSwitching"), "{hover}");
+    assert_eq!(hover["range"]["start"]["character"], character);
+    assert_eq!(hover["range"]["end"]["character"], character + 4);
+    for (needle, literal) in [
+        ("GetPed(48)", "48"),
+        ("flag 48", "48"),
+        ("IsControlJustPressed(38", "38"),
+        ("GetControlGroupInstructionalButton(0, 38", "38"),
+        ("SetControlGroupColor(0, 38", "38"),
+        ("SetPedResetFlag(PlayerPedId(), 48", "48"),
+        ("SetControlNormal(0, 38, 51)", "51"),
+        ("GetPedConfigFlag(32", "32"),
+        ("48, 32)", "32"),
+    ] {
+        let (line, character) = pos(text, needle, needle.rfind(literal).unwrap() as u32);
+        assert!(client.hover_text(CLIENT, line, character).is_empty(), "unrelated argument/comment: {needle}");
+    }
+    let (line, character) = pos(text, "38, 51)", 4);
+    assert!(client.hover_text(CLIENT, line, character).contains("INPUT_CONTEXT"));
+}
+
+#[test]
+fn native_argument_hovers_ignore_expressions_unknown_ids_and_unrelated_functions() {
+    let mut client = Client::start(fixture_root());
+    let cases = [
+        ("local value = 38", "38"),
+        ("CustomControl(0, 38)", "38"),
+        ("controls.IsControlJustPressed(0, 38)", "38"),
+        ("controls:IsControlJustPressed(0, 38)", "38"),
+        ("_G.IsControlJustPressed(0, 38)", "38"),
+        ("Citizen.InvokeNative(0x580417101DDB492F, 0, 38)", "38"),
+        ("IsControlJustPressed(0, 38 + 1)", "38"),
+        ("IsControlJustPressed(0, 38 | 1)", "38"),
+        ("IsControlJustPressed(0, -38)", "38"),
+        ("IsControlJustPressed(0, tonumber(38))", "38"),
+        ("IsControlJustPressed(0, {38})", "38"),
+        ("IsControlJustPressed(0, '38')", "38"),
+        ("IsControlJustPressed(0, 38.5)", "38.5"),
+        ("IsControlJustPressed(0, 9999)", "9999"),
+        ("IsControlJustPressed(0, 38oops)", "38oops"),
+        ("IsControlJustPressed(0, 0xZZ)", "0xZZ"),
+        ("GetPedResetFlag(PlayerPedId(), 48)", "48"),
+        ("SetPedConfigFlag(PlayerPedId(), 9999, true)", "9999"),
+        ("SetPedConfigFlag(PlayerPedId(), 48 + 1, true)", "48"),
+        ("N_0x0000000000000000(0, 38)", "38"),
+    ];
+    client.open_with(CLIENT, cases[0].0);
+    for (version, (text, literal)) in cases.into_iter().enumerate() {
+        client.change(CLIENT, version as i32 + 2, text);
+        let (line, character) = pos(text, literal, 0);
+        assert!(client.hover_text(CLIENT, line, character).is_empty(), "must not label {text}");
+    }
+    let text = "local control = 38\nIsControlJustPressed(0, control)";
+    client.change(CLIENT, 100, text);
+    let (line, character) = pos(text, ", control", 2);
+    let hover = client.hover_text(CLIENT, line, character);
+    assert!(hover.contains("local control: integer"), "ordinary variable hover is preserved: {hover}");
+    assert!(!hover.contains("INPUT_PICKUP"), "do not evaluate dynamic arguments: {hover}");
+}
+
+#[test]
+fn native_argument_hovers_ignore_shadowed_and_redefined_natives() {
+    let mut client = Client::start(fixture_root());
+    let cases = [
+        "local IsControlJustPressed = function(...) end\nIsControlJustPressed(0, 38)",
+        "local function IsControlJustPressed(...) end\nIsControlJustPressed(0, 38)",
+        "local IsControlJustPressed = IsControlJustPressed\nIsControlJustPressed(0, 38)",
+        "function check(IsControlJustPressed)\nIsControlJustPressed(0, 38)\nend",
+        "IsControlJustPressed = unknown\nIsControlJustPressed(0, 38)",
+        "function IsControlJustPressed(...) end\nIsControlJustPressed(0, 38)",
+        "_G.IsControlJustPressed = function(...) end\nIsControlJustPressed(0, 38)",
+        "_ENV['IsControlJustPressed'] = function(...) end\nIsControlJustPressed(0, 38)",
+        "local _ENV = {}\nIsControlJustPressed(0, 38)",
+        "_ENV = {}\nIsControlJustPressed(0, 38)",
+        "local N_0x580417101DDB492F = function(...) end\nN_0x580417101DDB492F(0, 38)",
+        "local SetPedConfigFlag = function(...) end\nSetPedConfigFlag(ped, 38, true)",
+    ];
+    client.open_with(CLIENT, cases[0]);
+    for (version, text) in cases.into_iter().enumerate() {
+        client.change(CLIENT, version as i32 + 2, text);
+        let (line, character) = pos(text, "38", 0);
+        assert!(client.hover_text(CLIENT, line, character).is_empty(), "must not label shadowed call: {text}");
+    }
+    // A local declaration in a different scope must not hide the real native here.
+    let text = "do local IsControlJustPressed = function(...) end end\nIsControlJustPressed(0, 38)";
+    client.change(CLIENT, 100, text);
+    let (line, character) = pos(text, "38", 0);
+    assert!(client.hover_text(CLIENT, line, character).contains("INPUT_PICKUP"));
+
+    // A definition in a visible resource file must suppress the native annotation too.
+    let other = "myresource/shared/config.lua";
+    client.open_with(other, "IsControlJustPressed = function(...) end");
+    assert!(client.hover_text(CLIENT, line, character).is_empty());
+    client.change(other, 2, "");
+    assert!(
+        client.hover_text(CLIENT, line, character).contains("INPUT_PICKUP"),
+        "removing an override restores native hover"
+    );
 }
 
 #[test]
@@ -1694,4 +2143,322 @@ fn escrow_encrypted_files_are_ignored() {
     client.open_with(SHOP_CLIENT, &"local = = =\n".repeat(200));
     let found = client.diagnostics_for(SHOP_CLIENT);
     assert_eq!(found.len(), 11, "syntax errors are capped at ten plus a summary: {found:?}");
+}
+
+fn framework_fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/framework_callbacks")
+}
+
+const FRAMEWORK_CLIENT: &str = "adapters/client.lua";
+const FRAMEWORK_IMPORTS: &str =
+    "local Core = exports['qb-core']:GetCoreObject()\nlocal Framework = exports.es_extended:getSharedObject()\nlocal QB = Core\nlocal ESX = Framework\n";
+
+fn framework_definitions(client: &mut Client, relative: &str, text: &str, needle: &str) -> Value {
+    let (line, column) = pos(text, needle, 2);
+    client.request("textDocument/definition", client.position_params(relative, line, column))
+}
+
+fn framework_hints(client: &mut Client, relative: &str, line: u32) -> Vec<String> {
+    let hints = client.request(
+        "textDocument/inlayHint",
+        json!({ "textDocument": { "uri": client.uri(relative) }, "range": {
+            "start": { "line": line, "character": 0 }, "end": { "line": line + 1, "character": 0 }
+        } }),
+    );
+    hints.as_array().unwrap().iter().filter_map(|hint| hint["label"].as_str().map(str::to_owned)).collect()
+}
+
+#[test]
+fn framework_callbacks_keep_completion_and_navigation_in_their_own_family() {
+    let mut client = Client::start(framework_fixture_root());
+    client.open_with(FRAMEWORK_CLIENT, "");
+    for (version, (call, expected, definition)) in (2..).zip([
+        ("QB.Functions.TriggerCallback", vec!["qb:guarded", "qb:only", "shared:call"], "adapters/server/qb.lua"),
+        ("ESX.TriggerServerCallback", vec!["esx:imported", "esx:only", "shared:call"], "adapters/server/esx.lua"),
+        ("lib.callback.await", vec!["ox:only", "shared:call"], "adapters/server/other.lua"),
+        ("TriggerServerEvent", vec!["native:only", "shared:call"], "adapters/server/other.lua"),
+    ]) {
+        let text = format!("{FRAMEWORK_IMPORTS}{call}('')\n{call}('shared:call', function() end, 1, 2)\n");
+        client.change(FRAMEWORK_CLIENT, version, &text);
+        let (line, column) = pos(&text, "('')", 2);
+        let mut labels = client.completion_labels(FRAMEWORK_CLIENT, line, column);
+        labels.sort();
+        assert_eq!(labels, expected, "{call}");
+
+        let found = framework_definitions(&mut client, FRAMEWORK_CLIENT, &text, "shared:call");
+        let locations = found.as_array().unwrap();
+        assert_eq!(locations.len(), 1, "{call}: {found}");
+        assert_eq!(locations[0]["uri"], client.uri(definition).as_str(), "{call}: {found}");
+        let source = std::fs::read_to_string(client.root.join(definition)).unwrap();
+        let registration =
+            if call == "TriggerServerEvent" { "RegisterNetEvent('shared:call'" } else { "'shared:call'" };
+        let (registration_line, _) = pos(&source, registration, 0);
+        assert_eq!(locations[0]["range"]["start"]["line"], registration_line, "{call}: {found}");
+    }
+}
+
+#[test]
+fn framework_callbacks_show_typed_payloads_without_source_response_or_async_returns() {
+    let mut client = Client::start(framework_fixture_root());
+    let text = client.open(FRAMEWORK_CLIENT);
+    for (call, value, family, payload, other_payload, expected_label, handler_file) in [
+        (
+            "QB.Functions.TriggerCallback",
+            "'water'",
+            "QB-Core callback",
+            "qbItem",
+            "esxVehicle",
+            "QB.Functions.TriggerCallback(name: string, cb: function, qbItem: string, qbAmount: integer)",
+            "qb.lua",
+        ),
+        (
+            "ESX.TriggerServerCallback",
+            "42",
+            "ESX callback",
+            "esxVehicle",
+            "qbItem",
+            "ESX.TriggerServerCallback(name: string, cb: function, esxVehicle: number, esxDepot: string)",
+            "esx.lua",
+        ),
+    ] {
+        let call_start = text.find(call).unwrap();
+        let call_text =
+            &text[call_start..text[call_start..].find('\n').map(|end| call_start + end).unwrap_or(text.len())];
+        let (line, column) = pos(&text, call_text, call_text.find(value).unwrap() as u32 + 1);
+        let result =
+            client.request("textDocument/signatureHelp", client.position_params(FRAMEWORK_CLIENT, line, column));
+        assert_eq!(result["signatures"][0]["label"], expected_label, "{result}");
+        assert_eq!(result["activeParameter"], 2, "{result}");
+        let note = result["signatures"][0]["documentation"]["value"].as_str().unwrap_or_default();
+        assert!(note.contains(handler_file), "{note}");
+        let name_column = call_text.find("shared:call").unwrap() as u32 + 2;
+        let hover = client.hover_text(FRAMEWORK_CLIENT, line, name_column);
+        assert!(hover.contains(family) && hover.contains(payload) && hover.contains(handler_file), "{hover}");
+        assert!(!hover.contains(other_payload) && !hover.contains("source: integer"), "{hover}");
+        assert!(hover.to_lowercase().contains("asynchronous"), "{hover}");
+        let hints = framework_hints(&mut client, FRAMEWORK_CLIENT, line);
+        assert!(hints.contains(&format!("{payload}:")), "{hints:?}");
+        assert!(!hints.contains(&"source:".to_string()) && !hints.contains(&format!("{other_payload}:")), "{hints:?}");
+    }
+    for (call, expected, forbidden) in
+        [("lib.callback.await", "oxPayload:", "nativePayload:"), ("TriggerServerEvent", "nativePayload:", "oxPayload:")]
+    {
+        let (line, _) = pos(&text, call, 0);
+        let hints = framework_hints(&mut client, FRAMEWORK_CLIENT, line);
+        assert!(hints.contains(&expected.to_string()) && !hints.contains(&forbidden.to_string()), "{hints:?}");
+        assert!(!hints.iter().any(|hint| hint.starts_with("qb") || hint.starts_with("esx")), "{hints:?}");
+    }
+}
+
+#[test]
+fn framework_callbacks_complete_whole_strings_for_minimal_and_snippet_clients() {
+    for snippets in [false, true] {
+        let mut client = Client::start_with_capabilities(
+            framework_fixture_root(),
+            json!({ "textDocument": { "completion": { "completionItem": { "snippetSupport": snippets } } } }),
+        );
+        client.open_with(FRAMEWORK_CLIENT, "");
+        for (version, (call, prefix, expected)) in (2..).zip([
+            ("QB.Functions.TriggerCallback", "qb:", "qb:only"),
+            ("ESX.TriggerServerCallback", "esx:", "esx:only"),
+        ]) {
+            let head = format!("local emoji = '🚗'; {call}('");
+            let text = format!("{FRAMEWORK_IMPORTS}{head}{prefix}stale', function() end)");
+            let line = FRAMEWORK_IMPORTS.lines().count() as u32;
+            let start = head.encode_utf16().count() as u32;
+            client.change(FRAMEWORK_CLIENT, version, &text);
+            let result = client.request(
+                "textDocument/completion",
+                client.position_params(FRAMEWORK_CLIENT, line, start + prefix.len() as u32),
+            );
+            let item = result["items"].as_array().unwrap().iter().find(|item| item["label"] == expected).unwrap();
+            assert_eq!(
+                item["textEdit"],
+                json!({ "range": {
+                "start": { "line": line, "character": start },
+                "end": { "line": line, "character": start + prefix.len() as u32 + 5 }
+            }, "newText": expected }),
+                "{result}"
+            );
+            assert!(item["insertTextFormat"].is_null(), "literal event names are not snippets: {item}");
+        }
+    }
+}
+
+#[test]
+fn framework_callbacks_require_proven_unmodified_roots_and_the_name_argument() {
+    let mut client = Client::start(framework_fixture_root());
+    client.open_with(FRAMEWORK_CLIENT, "");
+    let cases = [
+        "local QB = {}\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "local function demo(QB)\nQB.Functions.TriggerCallback('qb:only', function() end, 7)\nend",
+        "local QB = exports['qb-core']:GetCoreObject()\nQB = {}\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "local QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback = function() end\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "local exports = {}\nlocal QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "_G.exports = {}\nlocal QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "_ENV['exports'] = {}\nlocal QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "_G.exports['qb-core'].GetCoreObject = function() return {} end\nlocal QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "local _ENV = {}\nlocal QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "local QB = exports['qb-core']:GetCoreObject('subset')\nQB.Functions.TriggerCallback('qb:only', function() end, 7)",
+        "local QB = exports['qb-core']:GetCoreObject()\nQB.Functions:TriggerCallback('qb:only', function() end, 7)",
+        "local QB = exports['qb-core']:GetCoreObject()\nQB.Functions.TriggerCallback('missing', function() end, 'qb:only')",
+        "local QB = exports['qb-core']:GetCoreObject()\nlocal name = 'qb:only'\nQB.Functions.TriggerCallback(name, function() end, 7)",
+        "local ESX = {}\nESX.TriggerServerCallback('esx:only', function() end, 7)",
+        "local ESX = exports.es_extended:getSharedObject()\nESX.TriggerServerCallback = function() end\nESX.TriggerServerCallback('esx:only', function() end, 7)",
+        "local Core = exports.es_extended:getSharedObject()\nlocal ESX = Core\nCore.TriggerServerCallback = function() end\nESX.TriggerServerCallback('esx:only', function() end, 7)",
+        "local ESX = exports.es_extended:getSharedObject()\nESX:TriggerServerCallback('esx:only', function() end, 7)",
+        "print('qb:only')",
+    ];
+    for (version, text) in (2..).zip(cases) {
+        client.change(FRAMEWORK_CLIENT, version, text);
+        let needle = if text.contains("qb:only") { "qb:only" } else { "esx:only" };
+        let (line, column) = pos(text, needle, 2);
+        let labels = client.completion_labels(FRAMEWORK_CLIENT, line, column);
+        assert!(!labels.contains(&needle.to_string()), "{text}: {labels:?}");
+        let found = framework_definitions(&mut client, FRAMEWORK_CLIENT, text, needle);
+        assert!(found.is_null() || found.as_array().is_some_and(Vec::is_empty), "{text}: {found}");
+        let hover = client.hover_text(FRAMEWORK_CLIENT, line, column);
+        assert!(!hover.contains("QB-Core callback") && !hover.contains("ESX callback"), "{text}: {hover}");
+        let signature =
+            client.request("textDocument/signatureHelp", client.position_params(FRAMEWORK_CLIENT, line, column));
+        let rendered = signature.to_string();
+        assert!(!rendered.contains("qbUnique") && !rendered.contains("esxUnique"), "{text}: {signature}");
+    }
+
+    client.open_with("imported_esx/client.lua", "");
+    for (version, mutation) in (2..).zip([
+        "_G.ESX = {}",
+        "_ENV['ESX'] = {}",
+        "_G.ESX.TriggerServerCallback = function() end",
+        "_ENV['ESX']['TriggerServerCallback'] = function() end",
+    ]) {
+        let text = format!("{mutation}\nESX.TriggerServerCallback('esx:imported', function() end, 7)");
+        client.change("imported_esx/client.lua", version, &text);
+        let (line, column) = pos(&text, "esx:imported", 2);
+        let labels = client.completion_labels("imported_esx/client.lua", line, column);
+        assert!(!labels.contains(&"esx:imported".to_string()), "{text}: {labels:?}");
+        let found = framework_definitions(&mut client, "imported_esx/client.lua", &text, "esx:imported");
+        assert!(found.is_null() || found.as_array().is_some_and(Vec::is_empty), "{text}: {found}");
+    }
+}
+
+#[test]
+fn framework_callbacks_honor_server_registration_client_trigger_and_shared_guards() {
+    let mut client = Client::start(framework_fixture_root());
+    let shared = client.open("adapters/shared.lua");
+    let (line, column) = pos(&shared, "'guarded'", 2);
+    let signature =
+        client.request("textDocument/signatureHelp", client.position_params("adapters/shared.lua", line, column));
+    assert!(signature["signatures"][0]["label"].as_str().unwrap_or_default().contains("guardedPayload"), "{signature}");
+
+    let imported = client.open("imported_esx/client.lua");
+    let definitions = framework_definitions(&mut client, "imported_esx/client.lua", &imported, "esx:imported");
+    assert_eq!(definitions[0]["uri"], client.uri("imported_esx/server.lua").as_str(), "{definitions}");
+    let (line, column) = pos(&imported, "'imported'", 2);
+    let signature =
+        client.request("textDocument/signatureHelp", client.position_params("imported_esx/client.lua", line, column));
+    assert!(
+        signature["signatures"][0]["label"].as_str().unwrap_or_default().contains("importedPayload"),
+        "{signature}"
+    );
+
+    client.open_with(FRAMEWORK_CLIENT, "");
+    let wrong_registration = format!("{FRAMEWORK_IMPORTS}QB.Functions.CreateCallback('qb:client-invalid', function(source, cb, badPayload) end)\nESX.RegisterServerCallback('esx:client-invalid', function(source, cb, badPayload) end)\nQB.Functions.TriggerCallback('')\nESX.TriggerServerCallback('')");
+    client.change(FRAMEWORK_CLIENT, 2, &wrong_registration);
+    for call in ["QB.Functions.TriggerCallback('')", "ESX.TriggerServerCallback('')"] {
+        let (line, column) = pos(&wrong_registration, call, call.find("''").unwrap() as u32 + 1);
+        let labels = client.completion_labels(FRAMEWORK_CLIENT, line, column);
+        assert!(!labels.iter().any(|label| label.ends_with("client-invalid")), "{labels:?}");
+    }
+    for (relative, text) in [
+        ("adapters/server/wrongside.lua", format!("{FRAMEWORK_IMPORTS}QB.Functions.TriggerCallback('qb:only', function() end, 7)")),
+        ("adapters/shared.lua", format!("{FRAMEWORK_IMPORTS}QB.Functions.CreateCallback('qb:unguarded', function(source, cb, badPayload) end)\nQB.Functions.TriggerCallback('qb:only', function() end, 7)")),
+    ] {
+        if relative == "adapters/shared.lua" { client.change(relative, 2, &text); } else { client.open_with(relative, &text); }
+        let (line, column) = pos(&text, "qb:only", 2);
+        let labels = client.completion_labels(relative, line, column);
+        assert!(!labels.contains(&"qb:only".to_string()), "{relative}: {labels:?}");
+        let found = framework_definitions(&mut client, relative, &text, "qb:only");
+        assert!(found.is_null() || found.as_array().is_some_and(Vec::is_empty), "{relative}: {found}");
+        let signature = client.request("textDocument/signatureHelp", client.position_params(relative, line, column));
+        assert!(!signature.to_string().contains("qbUnique"), "{relative}: {signature}");
+    }
+}
+
+#[test]
+fn framework_callbacks_refresh_unsaved_registration_names_and_payloads() {
+    let mut client = Client::start(framework_fixture_root());
+    let original = client.open("adapters/server/qb.lua");
+    let client_text = format!("{FRAMEWORK_IMPORTS}QB.Functions.TriggerCallback('qb:renamed', function() end, 'item', 3)\nQB.Functions.TriggerCallback('')");
+    client.open_with(FRAMEWORK_CLIENT, &client_text);
+    let (line, column) = pos(&client_text, "('')", 2);
+    assert!(client.completion_labels(FRAMEWORK_CLIENT, line, column).contains(&"qb:only".to_string()));
+    let changed = original.replace("qb:only", "qb:renamed").replace("qbUnique", "freshPayload");
+    client.change("adapters/server/qb.lua", 2, &changed);
+    let labels = client.completion_labels(FRAMEWORK_CLIENT, line, column);
+    assert!(labels.contains(&"qb:renamed".to_string()) && !labels.contains(&"qb:only".to_string()), "{labels:?}");
+    let (call_line, call_column) = pos(&client_text, "'item'", 2);
+    let signature =
+        client.request("textDocument/signatureHelp", client.position_params(FRAMEWORK_CLIENT, call_line, call_column));
+    assert!(signature["signatures"][0]["label"].as_str().unwrap_or_default().contains("freshPayload"), "{signature}");
+    let definitions = framework_definitions(&mut client, FRAMEWORK_CLIENT, &client_text, "qb:renamed");
+    assert_eq!(definitions[0]["uri"], client.uri("adapters/server/qb.lua").as_str(), "{definitions}");
+
+    client.change("adapters/server/qb.lua", 3, "local QB = exports['qb-core']:GetCoreObject()\nlocal name = 'qb:renamed'\nQB.Functions.CreateCallback(name, function(source, cb, shouldNotInfer) end)\n");
+    let labels = client.completion_labels(FRAMEWORK_CLIENT, line, column);
+    assert!(!labels.contains(&"qb:renamed".to_string()) && !labels.contains(&"qb:only".to_string()), "{labels:?}");
+    let signature =
+        client.request("textDocument/signatureHelp", client.position_params(FRAMEWORK_CLIENT, call_line, call_column));
+    assert!(
+        !signature.to_string().contains("freshPayload") && !signature.to_string().contains("shouldNotInfer"),
+        "{signature}"
+    );
+}
+
+#[test]
+fn framework_callbacks_do_not_choose_between_conflicting_handler_payloads() {
+    let mut client = Client::start(framework_fixture_root());
+    client.open_with("adapters/server/conflict.lua", "local QB = exports['qb-core']:GetCoreObject()\nQB.Functions.CreateCallback('shared:call', function(source, cb, conflictingPayload) end)\n");
+    let text = client.open(FRAMEWORK_CLIENT);
+    let definitions = framework_definitions(&mut client, FRAMEWORK_CLIENT, &text, "shared:call");
+    assert_eq!(definitions.as_array().unwrap().len(), 2, "{definitions}");
+    let (line, column) = pos(&text, "'water'", 2);
+    let signature =
+        client.request("textDocument/signatureHelp", client.position_params(FRAMEWORK_CLIENT, line, column));
+    assert!(
+        !signature.to_string().contains("qbItem") && !signature.to_string().contains("conflictingPayload"),
+        "{signature}"
+    );
+    let hints = framework_hints(&mut client, FRAMEWORK_CLIENT, line);
+    assert!(
+        !hints.contains(&"qbItem:".to_string()) && !hints.contains(&"conflictingPayload:".to_string()),
+        "{hints:?}"
+    );
+
+    client.change(
+        "adapters/server/conflict.lua",
+        2,
+        "local QB = exports['qb-core']:GetCoreObject()\nQB.Functions.CreateCallback('shared:call', unknownHandler)\n",
+    );
+    let definitions = framework_definitions(&mut client, FRAMEWORK_CLIENT, &text, "shared:call");
+    assert_eq!(
+        definitions.as_array().unwrap().len(),
+        2,
+        "an unresolved handler still has a registration: {definitions}"
+    );
+    let signature =
+        client.request("textDocument/signatureHelp", client.position_params(FRAMEWORK_CLIENT, line, column));
+    assert!(
+        !signature.to_string().contains("qbItem"),
+        "an unresolved duplicate must not select the known handler: {signature}"
+    );
+    let hints = framework_hints(&mut client, FRAMEWORK_CLIENT, line);
+    assert!(!hints.contains(&"qbItem:".to_string()), "{hints:?}");
+
+    let (name_line, name_column) = pos(&text, "shared:call", 2);
+    let completion =
+        client.request("textDocument/completion", client.position_params(FRAMEWORK_CLIENT, name_line, name_column));
+    let item = completion["items"].as_array().unwrap().iter().find(|item| item["label"] == "shared:call").unwrap();
+    let detail = item["detail"].as_str().unwrap_or_default();
+    assert!(!detail.contains("qbItem") && detail.contains("Multiple handlers"), "{item}");
 }

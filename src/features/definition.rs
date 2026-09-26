@@ -1,10 +1,11 @@
 use lsp_types::{GotoDefinitionResponse, Location, Position, Range};
 use qbx_lua_syntax::ast::ExprKind;
 
-use super::hover::{target_at, Target};
+use super::hover::{event_string_context, target_at, Target};
 use super::with_infer;
 use crate::document::Document;
-use crate::index::{EventKind, FileId, FileOrigin};
+use crate::index::{EventFamily, EventKind, FileId, FileOrigin};
+use crate::infer::Infer;
 use crate::locate::locate;
 use crate::workspace::Workspace;
 
@@ -15,7 +16,7 @@ fn location(ws: &Workspace, file: FileId, range: Range) -> Option<Location> {
     Some(Location::new(entry.uri.clone(), range))
 }
 
-fn string_definition(ws: &Workspace, doc: &Document, offset: u32) -> Vec<Location> {
+fn string_definition(ws: &Workspace, infer: &Infer, doc: &Document, offset: u32) -> Vec<Location> {
     let located = locate(&doc.chunk, offset);
     let Some((string, call)) = located.string else { return Vec::new() };
     let ExprKind::String(value) = &string.kind else { return Vec::new() };
@@ -46,9 +47,14 @@ fn string_definition(ws: &Workspace, doc: &Document, offset: u32) -> Vec<Locatio
             .into_iter()
             .collect();
     }
+    let context = event_string_context(infer, call);
     ws.index
         .events()
         .filter(|(_, e)| e.name == *value && e.kind != EventKind::Trigger)
+        .filter(|(_, event)| match &context {
+            Some(context) => context.accepts_registration(event),
+            None => matches!(event.family, EventFamily::Native | EventFamily::OxLib),
+        })
         .filter_map(|(file, event)| location(ws, file, event.range))
         .collect()
 }
@@ -74,7 +80,7 @@ pub fn definition(ws: &Workspace, doc: &Document, position: Position) -> Option<
             let aliases = ws.index.alias_defs(&name).into_iter().map(|(file, alias)| (file, alias.range));
             classes.chain(aliases).filter_map(|(file, range)| location(ws, file, range)).collect()
         }
-        None => string_definition(ws, doc, offset),
+        None => string_definition(ws, infer, doc, offset),
     });
     (!locations.is_empty()).then_some(GotoDefinitionResponse::Array(locations))
 }

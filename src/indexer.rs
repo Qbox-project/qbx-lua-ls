@@ -10,7 +10,8 @@ use qbx_lua_syntax::ast::*;
 use qbx_lua_syntax::{Comment, LineIndex, SmolStr, Span};
 
 use crate::index::{
-    AliasDef, ClassDef, Element, EventDef, EventKind, FileId, FileIndex, Index, Member, Symbol, SymbolKind,
+    AliasDef, ClassDef, Element, EventDef, EventFamily, EventKind, FileId, FileIndex, Index, Member, NuiCallbackDef,
+    Symbol, SymbolKind,
 };
 use crate::infer::{table_elements, table_fields, FileContext, Infer};
 use crate::luacats::{parse_doc_lines, DocGroup};
@@ -65,6 +66,7 @@ pub fn index_file(
         infer: &infer,
         side,
         regions: SideRegions::of(source, chunk),
+        nui_globals: crate::nui_callbacks::NuiGlobals::of(&ctx),
         out: FileIndex::default(),
         depth: 0,
     };
@@ -86,6 +88,7 @@ struct Indexer<'a> {
     infer: &'a Infer<'a>,
     side: Option<Side>,
     regions: SideRegions,
+    nui_globals: crate::nui_callbacks::NuiGlobals,
     out: FileIndex,
     depth: u32,
 }
@@ -609,30 +612,82 @@ impl<'a> Indexer<'a> {
         self.push_member(owner, symbol);
     }
 
-    fn event(&mut self, path: &str, args: &[Expr], offset: u32) {
-        let kind = if NET_EVENT_CALLS.contains(&path) {
-            EventKind::NetEvent
-        } else if HANDLER_CALLS.contains(&path) {
-            EventKind::Handler
-        } else if CALLBACK_CALLS.contains(&path) {
-            EventKind::Callback
-        } else if TRIGGER_CALLS.contains(&path) {
-            EventKind::Trigger
+    fn event(&mut self, callee: &Expr, args: &[Expr], offset: u32) {
+        let framework = crate::framework_callbacks::classify(self.ctx, self.infer.index, callee);
+        let side = self.regions.effective(offset, self.side);
+        let (family, kind) = if let Some(call) = framework {
+            if side != Some(call.required_side()) {
+                return;
+            }
+            (call.family, call.kind)
         } else {
-            return;
+            let Some(path) = callee.dotted_path() else { return };
+            let path = path.as_str();
+            if NET_EVENT_CALLS.contains(&path) {
+                (EventFamily::Native, EventKind::NetEvent)
+            } else if HANDLER_CALLS.contains(&path) {
+                (EventFamily::Native, EventKind::Handler)
+            } else if CALLBACK_CALLS.contains(&path) {
+                (EventFamily::OxLib, EventKind::Callback)
+            } else if TRIGGER_CALLS.contains(&path) {
+                (if path.starts_with("lib.") { EventFamily::OxLib } else { EventFamily::Native }, EventKind::Trigger)
+            } else {
+                return;
+            }
         };
         let Some(name_arg) = args.first() else { return };
         let Some(name) = name_arg.as_string().filter(|n| !n.is_empty()) else { return };
-        let handler = args.iter().skip(1).find_map(|arg| match &arg.kind {
-            ExprKind::Function(func) => Some(Arc::new(self.infer.fun_type(func, None, false))),
-            _ => None,
-        });
+        let handler = if framework.is_some() {
+            args.get(1).filter(|_| kind == EventKind::Callback).and_then(|arg| match &arg.kind {
+                ExprKind::Function(func) => Some(Arc::new(self.infer.fun_type(func, Some(offset), false))),
+                ExprKind::Name(name) => {
+                    let Some(Resolved::Local(id)) = self.ctx.resolution.resolve_at(name.span.start) else {
+                        return None;
+                    };
+                    if self.ctx.resolution.local(id).refs.iter().any(|reference| reference.write) {
+                        return None;
+                    }
+                    self.infer.expr(arg).as_fun().cloned()
+                }
+                _ => None,
+            })
+        } else {
+            args.iter().skip(1).find_map(|arg| match &arg.kind {
+                ExprKind::Function(func) => Some(Arc::new(self.infer.fun_type(func, None, false))),
+                _ => None,
+            })
+        };
         self.out.events.push(EventDef {
             name: name.clone(),
             kind,
-            side: self.regions.effective(offset, self.side),
+            family,
+            side,
             handler,
             range: self.range(name_arg.span),
+        });
+    }
+
+    fn nui_callback(&mut self, callee: &Expr, args: &[Expr], offset: u32) {
+        let side = self.regions.effective(offset, self.side);
+        if !matches!(side, Some(Side::Client | Side::Shared)) || self.side == Some(Side::Server) {
+            return;
+        }
+        let Some(registration) = self.nui_globals.registration(self.ctx, callee) else { return };
+        let [argument, _, ..] = args else { return };
+        let Some(name) = argument.as_string().filter(|name| !name.is_empty()) else { return };
+        if self
+            .ctx
+            .chunk
+            .errors
+            .iter()
+            .any(|error| error.span.start < argument.span.end && error.span.end > argument.span.start)
+        {
+            return;
+        }
+        self.out.nui_callbacks.push(NuiCallbackDef {
+            name: name.clone(),
+            registration: registration.into(),
+            range: self.range(argument.span),
         });
     }
 
@@ -640,8 +695,9 @@ impl<'a> Indexer<'a> {
         match &expr.kind {
             ExprKind::Function(func) => self.func_body(func),
             ExprKind::Call { callee, args, .. } => {
+                self.event(callee, args, expr.span.start);
+                self.nui_callback(callee, args, expr.span.start);
                 if let Some(path) = callee.dotted_path() {
-                    self.event(&path, args, expr.span.start);
                     let first = args.first().and_then(|a| a.as_string());
                     if CONVAR_CALLS.contains(&path.as_str()) {
                         if let Some(name) = first.filter(|n| !n.is_empty() && !self.out.convars.contains(n)) {

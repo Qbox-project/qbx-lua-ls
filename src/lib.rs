@@ -1,10 +1,12 @@
 pub mod document;
 pub mod features;
+pub mod framework_callbacks;
 pub mod index;
 pub mod indexer;
 pub mod infer;
 pub mod locate;
 pub mod luacats;
+mod nui_callbacks;
 pub mod server;
 pub mod types;
 pub mod workspace;

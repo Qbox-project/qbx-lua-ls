@@ -7,6 +7,7 @@ use qbx_lua_analysis::project::read_source;
 use qbx_lua_analysis::scope::{resolve, GlobalRefKind, Resolved};
 use qbx_lua_syntax::{parse, LineIndex, Span};
 
+use super::assistant::{InspectionBudget, InspectionPositions};
 use super::member_refs::{in_document, is_renamable, member_occurrences, member_target};
 use crate::document::Document;
 use crate::index::FileOrigin;
@@ -45,33 +46,110 @@ fn global_occurrences(
     doc: &Document,
     name: &str,
 ) -> Vec<(Url, lsp_types::Range, bool)> {
+    global_occurrences_inner(ws, docs, doc, name, None)
+}
+
+fn global_occurrences_inner(
+    ws: &Workspace,
+    docs: &Documents,
+    doc: &Document,
+    name: &str,
+    mut budget: Option<&mut InspectionBudget>,
+) -> Vec<(Url, lsp_types::Range, bool)> {
     let mut out = Vec::new();
     for (id, entry) in ws.index.files() {
         if entry.origin == FileOrigin::Stub || !ws.index.is_related(doc.file, id) {
             continue;
         }
         let mentions = |text: &str| text.contains(name);
-        if let Some(open) = docs.get(&entry.uri) {
+        if budget.is_some() && out.len() >= 20_000 {
+            budget.as_deref_mut().unwrap().result_limit = true;
+            break;
+        }
+        if let Some(open) = (budget.is_some() && entry.uri == doc.uri).then_some(doc).or_else(|| docs.get(&entry.uri)) {
+            if budget.as_deref_mut().is_some_and(|budget| !budget.claim(&entry.path, open.text.len())) {
+                continue;
+            }
+            let positions = budget.as_ref().map(|_| InspectionPositions::new(&open.text));
             for global in open.resolution.globals.iter().filter(|g| g.name == name) {
-                out.push((entry.uri.clone(), open.range(global.span), global.kind != GlobalRefKind::Read));
+                if budget.is_some() && out.len() >= 20_000 {
+                    budget.as_deref_mut().unwrap().result_limit = true;
+                    break;
+                }
+                let range = positions
+                    .as_ref()
+                    .map_or_else(|| open.range(global.span), |positions| positions.range(global.span));
+                out.push((entry.uri.clone(), range, global.kind != GlobalRefKind::Read));
             }
             continue;
         }
-        let Ok(source) = read_source(&entry.path) else { continue };
+        let source = match budget.as_deref_mut() {
+            Some(budget) => budget.read(&entry.path),
+            None => read_source(&entry.path).ok(),
+        };
+        let Some(source) = source else { continue };
         if !mentions(&source) {
             continue;
         }
         let resolution = resolve(&parse(&source));
         let lines = LineIndex::new(&source);
+        let positions = budget.as_ref().map(|_| InspectionPositions::new(&source));
         for global in resolution.globals.iter().filter(|g| g.name == name) {
+            if budget.is_some() && out.len() >= 20_000 {
+                budget.as_deref_mut().unwrap().result_limit = true;
+                break;
+            }
             out.push((
                 entry.uri.clone(),
-                span_to_range(&source, &lines, global.span),
+                positions.as_ref().map_or_else(
+                    || span_to_range(&source, &lines, global.span),
+                    |positions| positions.range(global.span),
+                ),
                 global.kind != GlobalRefKind::Read,
             ));
         }
     }
     out
+}
+
+/// Agent-only variant: all related closed files share the request's source/result budget.
+pub(crate) fn references_bounded(
+    ws: &Workspace,
+    docs: &Documents,
+    doc: &Document,
+    position: Position,
+    include_declaration: bool,
+    budget: &mut InspectionBudget,
+) -> Vec<Location> {
+    let offset = doc.offset(position);
+    if let Some((Resolved::Local(id), _)) = doc.resolution.resolved_at_offset(offset) {
+        let local = doc.resolution.local(id);
+        let mut out = Vec::new();
+        let positions = InspectionPositions::new(&doc.text);
+        if include_declaration && !local.decl.is_empty() {
+            out.push(Location::new(doc.uri.clone(), positions.range(local.decl)));
+        }
+        for reference in &local.refs {
+            if out.len() >= 20_000 {
+                budget.result_limit = true;
+                break;
+            }
+            out.push(Location::new(doc.uri.clone(), positions.range(reference.span)));
+        }
+        return out;
+    }
+    let Some(name) = global_name_at(doc, offset) else {
+        let Some(target) = member_target(ws, doc, offset) else { return Vec::new() };
+        return super::member_refs::member_occurrences_bounded(ws, docs, doc, &target, budget)
+            .into_iter()
+            .map(|(uri, range)| Location::new(uri, range))
+            .collect();
+    };
+    global_occurrences_inner(ws, docs, doc, name, Some(budget))
+        .into_iter()
+        .filter(|(_, _, declaration)| include_declaration || !declaration)
+        .map(|(uri, range, _)| Location::new(uri, range))
+        .collect()
 }
 
 pub fn references(

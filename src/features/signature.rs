@@ -13,9 +13,14 @@ pub fn signature_help(ws: &Workspace, doc: &Document, position: Position) -> Opt
     let located = locate(&doc.chunk, offset);
     let site = located.call?;
     with_infer(ws, doc, |infer| {
-        let (fun, member) = infer.callee_fun(site.base, site.method)?;
-        let event = site.method.is_none().then(|| event_call(ws, doc, site.base, site.args, &fun)).flatten();
-        let fun = event.as_ref().map_or(fun, |e| e.fun.clone().into());
+        let resolved = infer.callee_fun(site.base, site.method);
+        let event = site
+            .method
+            .is_none()
+            .then(|| event_call(ws, doc, infer, site.base, site.args, resolved.as_ref().map(|(fun, _)| fun.as_ref())))
+            .flatten();
+        let (native, member) = resolved.map(|(fun, member)| (Some(fun), member)).unwrap_or_default();
+        let fun = event.as_ref().map(|e| e.fun.clone().into()).or(native)?;
         let (skip_params, skip_args) = fun.call_offsets(site.method.is_some());
         let params: Vec<_> = fun.params.iter().skip(skip_params).collect();
 

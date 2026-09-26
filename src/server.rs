@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 
 use crate::document::Document;
 use crate::features::{
-    code_action, completion, definition, diagnostics, folding, hover, inlay, references, semantic_tokens, signature,
-    symbols,
+    code_action, completion, definition, diagnostics, folding, hover, inlay, reference, references, semantic_tokens,
+    signature, symbols,
 };
 use crate::index::FileOrigin;
 use crate::workspace::{uri_to_path, Workspace};
@@ -691,6 +691,67 @@ impl Server {
                 "openDocuments": self.docs.len(),
                 "natives": qbx_fivem_data::native_count(),
             })),
+            "qbx/referenceSearch" => {
+                if !raw.is_null() && !raw.is_object() {
+                    return Err("reference search parameters must be an object or null".into());
+                }
+                let p = if raw.is_null() { reference::SearchParams::default() } else { params(raw)? };
+                reply(reference::search(p)?)
+            }
+            "qbx/referenceDetail" => {
+                if !raw.is_object() {
+                    return Err("reference detail parameters must be an object".into());
+                }
+                reply(reference::detail(params(raw)?)?)
+            }
+            "qbx/resourceDetails" => {
+                if !raw.is_object() {
+                    return Err("resource details parameters must be an object containing a file URI".into());
+                }
+                reply(crate::features::resource_details::details(&self.ws.index, params(raw)?)?)
+            }
+            "qbx/workspaceHealth" => {
+                if !raw.is_null() && !raw.as_object().is_some_and(|object| object.is_empty()) {
+                    return Err("workspace health parameters must be null or an empty object".into());
+                }
+                reply(crate::features::workspace_health::health(&self.ws.index))
+            }
+            "qbx/nuiResource" => {
+                if !raw.is_object() {
+                    return Err("NUI resource parameters must be an object containing a file URI".into());
+                }
+                reply(crate::features::nui_resource::resource(&self.ws.index, params(raw)?)?)
+            }
+            "qbx/resourceAssets" => {
+                if !raw.is_object() {
+                    return Err("resource asset parameters must be an object containing a file URI".into());
+                }
+                reply(crate::features::resource_assets::resource(&self.ws.index, &self.docs, params(raw)?)?)
+            }
+            "qbx/resources" => {
+                if !raw.is_object() {
+                    return Err("resource listing parameters must be an object".into());
+                }
+                reply(crate::features::assistant::resources(&self.ws, params(raw)?)?)
+            }
+            "qbx/diagnostics" => {
+                if !raw.is_object() {
+                    return Err("diagnostic snapshot parameters must be an object".into());
+                }
+                reply(crate::features::assistant::diagnostic_snapshot(
+                    &self.ws,
+                    &self.docs,
+                    params(raw)?,
+                    self.settings.diagnostics.enable.unwrap_or(true),
+                    &self.settings.rule_overrides(),
+                )?)
+            }
+            "qbx/symbolReferences" => {
+                if !raw.is_object() {
+                    return Err("symbol reference parameters must be an object".into());
+                }
+                reply(crate::features::assistant::symbol_references(&self.ws, &self.docs, params(raw)?)?)
+            }
             "qbx/reindex" => {
                 qbx_lua_analysis::startup::clear_cache();
                 let stats = self.ws.scan();

@@ -1,3 +1,4 @@
+pub mod assistant;
 pub mod code_action;
 pub mod completion;
 pub mod definition;
@@ -7,10 +8,16 @@ pub mod folding;
 pub mod hover;
 pub mod inlay;
 pub mod member_refs;
+mod native_argument;
+pub mod nui_resource;
+pub mod reference;
 pub mod references;
+pub mod resource_assets;
+pub mod resource_details;
 pub mod semantic_tokens;
 pub mod signature;
 pub mod symbols;
+pub mod workspace_health;
 
 use crate::document::Document;
 use crate::infer::{FileContext, Infer};

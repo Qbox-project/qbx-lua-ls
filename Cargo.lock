@@ -340,11 +340,11 @@ dependencies = [
 
 [[package]]
 name = "qbx_fivem_data"
-version = "1.0.3"
+version = "1.0.4"
 
 [[package]]
 name = "qbx_lua_analysis"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "globset",
  "ignore",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "qbx_lua_fmt"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "qbx_lua_syntax",
  "serde",
@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "qbx_lua_ls"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "qbx_lua_syntax"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "smol_str",
 ]

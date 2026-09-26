@@ -131,21 +131,30 @@ struct Finder<'a, 'b> {
     infer: &'a Infer<'b>,
     target: &'a MemberTarget,
     out: Vec<Range>,
+    limit: usize,
+    positions: Option<super::assistant::InspectionPositions<'a>>,
 }
 
 impl Finder<'_, '_> {
     fn check(&mut self, owner: &Type, name: &str, span: Span) {
+        if self.out.len() >= self.limit {
+            return;
+        }
         let same = self
             .infer
             .member(owner, name)
             .and_then(|m| m.location)
             .is_some_and(|location| self.target.declarations.contains(&location));
         if same {
-            self.out.push(self.doc.range(span));
+            self.out
+                .push(self.positions.as_ref().map_or_else(|| self.doc.range(span), |positions| positions.range(span)));
         }
     }
 
     fn table(&mut self, owner: &Type, expr: &Expr) {
+        if self.out.len() >= self.limit {
+            return;
+        }
         let Some(fields) = table_fields(expr) else { return };
         for field in fields {
             let (name, span, value) = match field {
@@ -169,6 +178,9 @@ impl Finder<'_, '_> {
 
 impl<'ast> Visitor<'ast> for Finder<'_, '_> {
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        if self.out.len() >= self.limit {
+            return;
+        }
         if let StmtKind::Function { name, .. } = &stmt.kind {
             let segments: Vec<&Name> = name.path.iter().chain(&name.method).collect();
             if segments.iter().any(|s| s.text == self.target.name) {
@@ -201,6 +213,9 @@ impl<'ast> Visitor<'ast> for Finder<'_, '_> {
     }
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
+        if self.out.len() >= self.limit {
+            return;
+        }
         match &expr.kind {
             ExprKind::Field { base, name, .. } | ExprKind::MethodCall { base, method: name, .. }
                 if name.text == self.target.name =>
@@ -221,16 +236,76 @@ impl<'ast> Visitor<'ast> for Finder<'_, '_> {
 }
 
 fn occurrences_in(ws: &Workspace, doc: &Document, target: &MemberTarget) -> Option<Vec<Range>> {
+    occurrences_limited(ws, doc, target, usize::MAX)
+}
+fn occurrences_limited(ws: &Workspace, doc: &Document, target: &MemberTarget, limit: usize) -> Option<Vec<Range>> {
     with_infer(ws, doc, |infer| {
-        let mut finder = Finder { doc, infer, target, out: Vec::new() };
+        let mut finder = Finder {
+            doc,
+            infer,
+            target,
+            out: Vec::new(),
+            limit,
+            positions: (limit != usize::MAX).then(|| super::assistant::InspectionPositions::new(&doc.text)),
+        };
         finder.visit_block(&doc.chunk.block);
         for (_, range) in target.declarations.iter().filter(|(file, _)| *file == doc.file) {
+            if finder.out.len() >= limit {
+                break;
+            }
             finder.out.push(declaration_range(doc, &target.name, *range)?);
         }
         finder.out.sort_by_key(|range| (range.start, range.end));
         finder.out.dedup();
         Some(finder.out)
     })
+}
+
+pub(crate) fn member_occurrences_bounded(
+    ws: &Workspace,
+    docs: &Documents,
+    doc: &Document,
+    target: &MemberTarget,
+    budget: &mut super::assistant::InspectionBudget,
+) -> Vec<(Url, Range)> {
+    let mut out = Vec::new();
+    for (id, entry) in ws.index.files() {
+        if out.len() >= 20_000 {
+            budget.result_limit = true;
+            break;
+        }
+        let reachable = target.declarations.iter().any(|(file, _)| *file == id)
+            || ws.index.is_related(doc.file, id)
+            || ws.index.is_related(target.file, id);
+        if entry.origin == FileOrigin::Stub || !reachable {
+            continue;
+        }
+        let closed;
+        let source = if entry.uri == doc.uri {
+            doc
+        } else if let Some(open) = docs.get(&entry.uri) {
+            open
+        } else {
+            let Some(text) = budget.read(&entry.path) else { continue };
+            closed = {
+                let mut closed = Document::new(entry.uri.clone(), entry.path.clone(), 0, text);
+                closed.file = id;
+                closed
+            };
+            &closed
+        };
+        if !budget.claim(&entry.path, source.text.len()) {
+            continue;
+        }
+        match occurrences_limited(ws, source, target, 20_000 - out.len()) {
+            Some(ranges) => out.extend(ranges.into_iter().map(|range| (entry.uri.clone(), range))),
+            None => budget.skip(&entry.path),
+        }
+    }
+    if out.len() >= 20_000 {
+        budget.result_limit = true;
+    }
+    out
 }
 
 /// Every use of the member across the files that can reach its definition. Closed files are parsed

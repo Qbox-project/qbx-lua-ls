@@ -12,16 +12,52 @@ Available features depend on the editor's LSP client.
 ## Features
 
 - Completion and hover for Lua symbols, FiveM natives, exports, events and callbacks.
+- Reference hovers for literal control IDs in PAD natives and ped configuration flags
+  in `SetPedConfigFlag` / `GetPedConfigFlag`, using bundled Cfx documentation.
+- Optional read-only reference search/detail requests for native, control and ped flag browsers,
+  with filters, pagination, source links and Lua insertion templates.
 - Definitions, references and rename for locals, globals and fields, including static string
   keys such as `Config['name']` and supported `---@field` declarations.
 - Hover and definitions for the classes, aliases and enums named in LuaCATS annotations.
 - Diagnostics and quick fixes with resource and client/server context.
 - Signature help, parameter hints, semantic tokens, folding and document/workspace symbols.
+- QB-Core and ESX server callback completion, navigation and payload hints from local handlers.
 - Whole-document formatting, configured through `qbxlint.toml`.
 - Completion for manifest paths, locale keys, convars, state bag keys and LuaCATS annotations.
+- Read-only resource, dependency-health, NUI callback and asset-reference requests
+  for editor tabs, plus paginated diagnostic and symbol-reference queries for assistants.
+
+Custom requests are documented in the [protocol reference](docs/protocol.md).
+The VS Code asset/utility interfaces and assistant MCP adapter live in `qbx-editor`.
 
 Opening a resource also indexes dependencies and imported scripts found in sibling resource
 folders. Add other locations through the `library` setting.
+
+Hovering `38` in `IsControlJustPressed(0, 38)` shows `INPUT_PICKUP` and its default
+QWERTY/Xbox bindings. Ped configuration flag hovers show the documented symbol;
+undocumented behavior is identified as such. References work offline and include
+source links. ID hovers apply only to recognized native arguments, not variables,
+calculated expressions or functions that shadow the native.
+
+## Framework callbacks
+
+The server recognizes QB-Core `Functions.CreateCallback` / `Functions.TriggerCallback`
+and ESX `RegisterServerCallback` / `TriggerServerCallback`. Receiver provenance comes
+from standard framework export initialization (including local aliases), supported
+framework imports or the framework's own resource. Arbitrary same-named tables are
+not framework receivers. Manifest sides and `IsDuplicityVersion()` guards restrict
+registrations to server code and triggers to client code.
+
+Literal callback names complete and navigate to locally indexed registrations.
+Payload signature help and inlay hints omit the handler's leading `source` and `cb`;
+LuaCATS annotations on local functions supply types. QB-Core, ESX, ox_lib and native
+events have separate name spaces. Conflicting payload definitions suppress derived
+hints, while navigation still lists the matching registrations. Handler return
+values are not treated as asynchronous callback responses.
+
+No framework API documentation is downloaded or bundled. Custom wrappers,
+client-callback/Await variants and response-type inference are not included.
+See the [convention and maintenance notes](docs/framework-callbacks.md) for source revisions and recognition limits.
 
 ## Build and run
 

@@ -1,12 +1,12 @@
 use lsp_types::{Hover, HoverContents, Position};
-use qbx_fivem_data::{native, native_docs};
+use qbx_fivem_data::{native, native_docs, Side};
 use qbx_lua_analysis::scope::{LocalId, LocalKind, Resolved};
-use qbx_lua_syntax::ast::ExprKind;
+use qbx_lua_syntax::ast::{Expr, ExprKind};
 use qbx_lua_syntax::{CommentKind, SmolStr, Span};
 
 use super::{lua_block, markdown, with_infer};
 use crate::document::Document;
-use crate::index::{ClassDef, FileId, FileOrigin, SymbolKind};
+use crate::index::{ClassDef, EventDef, EventFamily, EventKind, FileId, FileOrigin, SymbolKind};
 use crate::indexer::render_doc;
 use crate::infer::{Decl, Infer, MemberInfo};
 use crate::locate::locate;
@@ -321,7 +321,74 @@ fn type_hover(infer: &Infer, name: &str) -> Option<String> {
     Some(out)
 }
 
-fn string_hover(ws: &Workspace, doc: &Document, offset: u32) -> Option<(String, Span)> {
+pub(super) struct EventStringContext {
+    pub family: EventFamily,
+    pub target_side: Option<Side>,
+    pub active: bool,
+}
+
+impl EventStringContext {
+    pub fn framework(&self) -> bool {
+        matches!(self.family, EventFamily::QbCore | EventFamily::Esx)
+    }
+
+    pub fn accepts_registration(&self, event: &EventDef) -> bool {
+        self.active
+            && event.family == self.family
+            && event.kind != EventKind::Trigger
+            && (!self.framework() || (event.kind == EventKind::Callback && event.side == Some(Side::Server)))
+    }
+}
+
+/// A literal first argument is the only place framework callback names acquire special meaning.
+pub(super) fn event_string_context(infer: &Infer, call: Option<(&Expr, usize)>) -> Option<EventStringContext> {
+    let (call, 0) = call? else { return None };
+    let ExprKind::Call { callee, .. } = &call.kind else { return None };
+    let own_side = || {
+        let side = infer.index.file(infer.ctx.file).and_then(|file| file.side);
+        qbx_lua_analysis::side_guard::SideRegions::of(infer.ctx.source, infer.ctx.chunk)
+            .effective(call.span.start, side)
+    };
+    let path = callee.dotted_path();
+    let (family, target_side) = match path.as_deref() {
+        Some("TriggerServerEvent" | "TriggerLatentServerEvent") => (EventFamily::Native, Some(Side::Server)),
+        Some("TriggerClientEvent" | "TriggerLatentClientEvent") => (EventFamily::Native, Some(Side::Client)),
+        Some("TriggerEvent") => (EventFamily::Native, own_side()),
+        Some("AddEventHandler" | "RegisterNetEvent" | "RegisterServerEvent") => (EventFamily::Native, None),
+        Some("lib.callback" | "lib.callback.await") => {
+            let target = match own_side() {
+                Some(Side::Client) => Some(Side::Server),
+                Some(Side::Server) => Some(Side::Client),
+                _ => None,
+            };
+            (EventFamily::OxLib, target)
+        }
+        Some("lib.callback.register") => (EventFamily::OxLib, None),
+        _ => {
+            let framework = crate::framework_callbacks::classify(infer.ctx, infer.index, callee)?;
+            return Some(EventStringContext {
+                family: framework.family,
+                target_side: Some(Side::Server),
+                active: own_side() == Some(framework.required_side()),
+            });
+        }
+    };
+    Some(EventStringContext { family, target_side, active: true })
+}
+
+pub(super) fn event_handler_signature(event: &EventDef) -> Option<String> {
+    let handler = event.handler.as_deref()?;
+    if !matches!(event.family, EventFamily::QbCore | EventFamily::Esx) {
+        return Some(handler.signature(""));
+    }
+    let mut payload = handler.clone();
+    payload.params.drain(..payload.params.len().min(2));
+    // Responses arrive through cb; returning from the server handler is not the client call result.
+    payload.returns.clear();
+    Some(payload.signature(""))
+}
+
+fn string_hover(ws: &Workspace, infer: &Infer, doc: &Document, offset: u32) -> Option<(String, Span)> {
     let located = locate(&doc.chunk, offset);
     let (string, call) = located.string?;
     let ExprKind::String(value) = &string.kind else { return None };
@@ -336,18 +403,34 @@ fn string_hover(ws: &Workspace, doc: &Document, offset: u32) -> Option<(String, 
         let text = locale.text_of(value)?;
         return Some((format!("`{value}` · locales/{file}\n\n{text}"), string.span));
     }
-    let registrations: Vec<_> =
-        ws.index.events().filter(|(_, e)| e.name == *value && e.kind != crate::index::EventKind::Trigger).collect();
+    let context = event_string_context(infer, call);
+    let registrations: Vec<_> = ws
+        .index
+        .events()
+        .filter(|(_, event)| event.name == *value && event.kind != EventKind::Trigger)
+        .filter(|(_, event)| match &context {
+            Some(context) => context.accepts_registration(event),
+            None => matches!(event.family, EventFamily::Native | EventFamily::OxLib),
+        })
+        .collect();
     if registrations.is_empty() {
         return None;
     }
-    let mut out = format!("event `{value}`");
+    let label = match context.as_ref().map(|context| context.family) {
+        Some(EventFamily::QbCore) => "QB-Core callback",
+        Some(EventFamily::Esx) => "ESX callback",
+        _ => "event",
+    };
+    let mut out = format!("{label} `{value}`");
     for (file, event) in registrations.iter().take(5) {
         let Some(entry) = ws.index.file(*file) else { continue };
         let name = entry.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let side = entry.side.map_or("", |s| s.label());
-        let handler = event.handler.as_ref().map(|h| format!(" `{}`", h.signature(""))).unwrap_or_default();
+        let handler = event_handler_signature(event).map(|signature| format!(" `{signature}`")).unwrap_or_default();
         out.push_str(&format!("\n- {side} `{name}:{}`{handler}", event.range.start.line + 1));
+    }
+    if context.as_ref().is_some_and(EventStringContext::framework) {
+        out.push_str("\n\nPayload parameters omit the server's `source` and response `cb`. Responses are asynchronous; Lua return values are not inferred.");
     }
     Some((out, string.span))
 }
@@ -355,7 +438,9 @@ fn string_hover(ws: &Workspace, doc: &Document, offset: u32) -> Option<(String, 
 pub fn hover(ws: &Workspace, doc: &Document, position: Position) -> Option<Hover> {
     let offset = doc.offset(position);
     let (text, span) = with_infer(ws, doc, |infer| {
-        let Some(target) = target_at(infer, doc, offset) else { return string_hover(ws, doc, offset) };
+        let Some(target) = target_at(infer, doc, offset) else {
+            return super::native_argument::hover(ws, doc, offset).or_else(|| string_hover(ws, infer, doc, offset));
+        };
         let text = match &target {
             Target::Local(id, _) => Some(local_hover(infer, *id)),
             Target::Global(name, _) => global_hover(ws, infer, name),

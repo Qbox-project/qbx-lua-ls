@@ -33,9 +33,12 @@ impl Hints<'_, '_> {
         if self.out.len() >= MAX_HINTS || !args.iter().any(is_literal) {
             return;
         }
-        let Some((fun, _)) = self.infer.callee_fun(base, method) else { return };
-        let event = method.is_none().then(|| event_call(self.ws, self.doc, base, args, &fun)).flatten();
-        let fun = event.map_or(fun, |e| e.fun.into());
+        let native = self.infer.callee_fun(base, method).map(|(fun, _)| fun);
+        let event = method
+            .is_none()
+            .then(|| event_call(self.ws, self.doc, self.infer, base, args, native.as_deref()))
+            .flatten();
+        let Some(fun) = event.map(|e| e.fun.into()).or(native) else { return };
         let (skip_params, skip_args) = fun.call_offsets(method.is_some());
         for (arg, param) in args.iter().skip(skip_args).zip(fun.params.iter().skip(skip_params)) {
             if !is_literal(arg) || param.name == "..." || param.name.is_empty() || !self.range.contains(arg.span.start)

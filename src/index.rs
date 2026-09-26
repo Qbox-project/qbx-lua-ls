@@ -79,13 +79,30 @@ pub enum EventKind {
     Trigger,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EventFamily {
+    Native,
+    OxLib,
+    QbCore,
+    Esx,
+}
+
 #[derive(Clone, Debug)]
 pub struct EventDef {
     pub name: SmolStr,
     pub kind: EventKind,
+    pub family: EventFamily,
     /// The manifest side narrowed by the guard around this registration or trigger.
     pub side: Option<Side>,
     pub handler: Option<Arc<FunType>>,
+    pub range: Range,
+}
+
+#[derive(Clone, Debug)]
+pub struct NuiCallbackDef {
+    pub name: SmolStr,
+    /// The exact registration global, retained to check current cross-file replacements.
+    pub registration: SmolStr,
     pub range: Range,
 }
 
@@ -98,6 +115,8 @@ pub struct FileIndex {
     pub aliases: Vec<AliasDef>,
     pub exports: Vec<Symbol>,
     pub events: Vec<EventDef>,
+    /// NUI registrations are not network events and must not enter event completion.
+    pub nui_callbacks: Vec<NuiCallbackDef>,
     pub module_return: Option<Type>,
     pub convars: Vec<SmolStr>,
     pub state_keys: Vec<SmolStr>,

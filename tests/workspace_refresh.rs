@@ -111,7 +111,9 @@ fn labels(ws: &Workspace, doc: &Document) -> Vec<String> {
 fn payload(ws: &Workspace, doc: &Document) -> Option<Vec<String>> {
     let offset = doc.text.rfind("1)").unwrap();
     let site = qbx_lua_ls::locate::locate(&doc.chunk, offset as u32).call.unwrap();
-    let event = event_call::event_call(ws, doc, site.base, site.args, &FunType::default())?;
+    let event = qbx_lua_ls::features::with_infer(ws, doc, |infer| {
+        event_call::event_call(ws, doc, infer, site.base, site.args, Some(&FunType::default()))
+    })?;
     Some(event.fun.params.into_iter().map(|p| p.name.to_string()).collect())
 }
 

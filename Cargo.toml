@@ -1,7 +1,7 @@
 [package]
 name = "qbx_lua_ls"
 description = "Language server for FiveM Lua"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Qbox-project/qbx-lua-ls"
@@ -12,10 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Keep qbx-lint beside this checkout. Release builds use the same tag in both repositories.
-qbx_lua_syntax = { version = "=1.0.3", path = "../qbx-lint/crates/qbx_lua_syntax" }
-qbx_lua_fmt = { version = "=1.0.3", path = "../qbx-lint/crates/qbx_lua_fmt" }
-qbx_lua_analysis = { version = "=1.0.3", path = "../qbx-lint/crates/qbx_lua_analysis", features = ["docs"] }
-qbx_fivem_data = { version = "=1.0.3", path = "../qbx-lint/crates/qbx_fivem_data", features = ["docs"] }
+qbx_lua_syntax = { version = "=1.0.4", path = "../qbx-lint/crates/qbx_lua_syntax" }
+qbx_lua_fmt = { version = "=1.0.4", path = "../qbx-lint/crates/qbx_lua_fmt" }
+qbx_lua_analysis = { version = "=1.0.4", path = "../qbx-lint/crates/qbx_lua_analysis", features = ["docs"] }
+qbx_fivem_data = { version = "=1.0.4", path = "../qbx-lint/crates/qbx_fivem_data", features = ["docs"] }
 lsp-server = "0.7"
 lsp-types = "0.95"
 serde = { version = "1", features = ["derive"] }

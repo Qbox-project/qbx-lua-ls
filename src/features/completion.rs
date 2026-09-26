@@ -8,12 +8,13 @@ use qbx_lua_analysis::project::relative_slash_path;
 use qbx_lua_analysis::scope::LocalKind;
 use qbx_lua_syntax::ast::ExprKind;
 use qbx_lua_syntax::{CommentKind, Span, TokenKind};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::json;
 
+use super::hover::{event_handler_signature, event_string_context};
 use super::{lua_block, markdown, with_infer};
 use crate::document::Document;
-use crate::index::{EventKind, FileOrigin, SymbolKind};
+use crate::index::{EventFamily, EventKind, FileOrigin, SymbolKind};
 use crate::infer::{Infer, MemberInfo};
 use crate::locate::{locate, string_content_span};
 use crate::types::Type;
@@ -94,17 +95,6 @@ const PRIMITIVE_TYPES: &[&str] = &[
     "table<string, any>",
 ];
 
-const EVENT_NAME_CALLS: &[&str] = &[
-    "TriggerEvent",
-    "TriggerServerEvent",
-    "TriggerClientEvent",
-    "TriggerLatentServerEvent",
-    "TriggerLatentClientEvent",
-    "AddEventHandler",
-    "RegisterNetEvent",
-    "RegisterServerEvent",
-];
-const CALLBACK_NAME_CALLS: &[&str] = &["lib.callback", "lib.callback.await", "lib.callback.register"];
 const REQUIRE_CALLS: &[&str] = &["require", "lib.require", "lib.load"];
 const RESOURCE_NAME_CALLS: &[&str] = &[
     "GetResourceState",
@@ -352,39 +342,42 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
         ExprKind::Call { callee, .. } => callee.dotted_path(),
         _ => None,
     };
-    let Some(path) = path else { return Vec::new() };
-    let path = path.as_str();
-
-    if arg_index == 0 && (EVENT_NAME_CALLS.contains(&path) || CALLBACK_NAME_CALLS.contains(&path)) {
+    let context = with_infer(ws, doc, |infer| event_string_context(infer, Some((call, arg_index))));
+    if let Some(context) = context {
+        if !context.active {
+            return Vec::new();
+        }
         // Event names contain punctuation. Give clients the whole string content so a `:`
         // retrigger keeps filtering from the opening quote and accepting does not duplicate it.
         let token = &tokens[token_index];
         let content = string_content_span(token.span, &doc.text)
             .unwrap_or_else(|| Span::new(token.span.start + 1, token.span.end));
         let range = doc.range(content);
-        let wants_callbacks = CALLBACK_NAME_CALLS.contains(&path);
-        let own_side = ws.index.file(doc.file).and_then(|f| f.side);
-        let own_side =
-            qbx_lua_analysis::side_guard::SideRegions::of(&doc.text, &doc.chunk).effective(call.span.start, own_side);
-        // Where the handler has to live for this call to reach it.
-        let target_side = match path {
-            "TriggerServerEvent" | "TriggerLatentServerEvent" => Some(Side::Server),
-            "TriggerClientEvent" | "TriggerLatentClientEvent" => Some(Side::Client),
-            "TriggerEvent" => own_side,
-            "lib.callback" | "lib.callback.await" => match own_side {
-                Some(Side::Client) => Some(Side::Server),
-                Some(Side::Server) => Some(Side::Client),
-                _ => None,
-            },
-            _ => None,
-        };
+        let wants_callbacks = context.family != EventFamily::Native;
+        let target_side = context.target_side;
         let handled_on_target = |side: Option<Side>| !matches!((target_side, side), (Some(target), Some(side)) if !side.is_available_on(target));
+        let mut conflicting = FxHashSet::default();
+        if context.framework() {
+            let mut payloads = FxHashMap::default();
+            for (_, event) in ws.index.events().filter(|(_, event)| context.accepts_registration(event)) {
+                let signature = event_handler_signature(event);
+                if let Some(previous) = payloads.get(&event.name) {
+                    if previous != &signature {
+                        conflicting.insert(event.name.clone());
+                    }
+                } else {
+                    payloads.insert(event.name.clone(), signature);
+                }
+            }
+        }
         let candidates = |strict: bool| {
             let mut seen = FxHashSet::default();
             ws.index
                 .events()
+                .filter(|(_, event)| event.family == context.family)
                 .filter(|(_, e)| (e.kind == EventKind::Callback) == wants_callbacks || e.kind == EventKind::Trigger)
                 .filter(|(_, e)| !strict || (e.kind != EventKind::Trigger && handled_on_target(e.side)))
+                .filter(|(_, event)| !context.framework() || context.accepts_registration(event))
                 .filter(|(_, e)| seen.insert(e.name.clone()))
                 .map(|(file, event)| {
                     let mut out = item(&event.name, CompletionItemKind::EVENT, 0);
@@ -394,13 +387,15 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
                     let entry = ws.index.file(file);
                     let origin = entry.and_then(|f| f.resource).and_then(|r| ws.index.resource(r));
                     let side = event.side.map_or(String::new(), |s| format!(" ({})", s.label()));
-                    out.detail = match (&event.handler, origin) {
-                        (Some(handler), Some(resource)) => {
-                            Some(format!("{}{side} · {}", resource.name, handler.signature("")))
+                    out.detail = if conflicting.contains(&event.name) {
+                        Some("Multiple handlers; payloads differ".into())
+                    } else {
+                        match (event_handler_signature(event), origin) {
+                            (Some(handler), Some(resource)) => Some(format!("{}{side} · {handler}", resource.name)),
+                            (None, Some(resource)) => Some(format!("{}{side}", resource.name)),
+                            (Some(handler), None) => Some(handler),
+                            (None, None) => None,
                         }
-                        (None, Some(resource)) => Some(format!("{}{side}", resource.name)),
-                        (Some(handler), None) => Some(handler.signature("")),
-                        (None, None) => None,
                     };
                     out
                 })
@@ -408,6 +403,8 @@ fn string_items(ws: &Workspace, doc: &Document, offset: u32, token_index: usize)
         };
         return candidates(target_side.is_some());
     }
+    let Some(path) = path else { return Vec::new() };
+    let path = path.as_str();
     if arg_index == 0 && matches!(path, "lib.onCache") {
         return cache_key_items(ws, doc);
     }
