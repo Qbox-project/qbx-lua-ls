@@ -22,6 +22,13 @@ fn main() {
         println!("qbx-lua-ls {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        println!(
+            "qbx-lua-ls {}\n\nUsage: qbx-lua-ls             start the language server over stdio\n       qbx-lua-ls --index <dir> index a folder once and print what was found\n       qbx-lua-ls --version     print the version",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
     if let Some(dir) = std::env::args().skip_while(|arg| arg != "--index").nth(1) {
         print_index_stats(dir.into());
         return;
