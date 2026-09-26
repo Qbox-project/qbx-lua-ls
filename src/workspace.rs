@@ -326,7 +326,7 @@ impl Workspace {
             }
             for event in file.index.events.iter().filter(|e| matches!(e.kind, EventKind::NetEvent | EventKind::Handler))
             {
-                refs.add_event(event.name.clone(), event.side, event.handler.as_deref().map(arity));
+                refs.add_event(event.name.clone(), event.side, event.handler.as_deref().map(arity), resource.clone());
             }
             if let Some(resource) = resource {
                 for export in &file.index.exports {
