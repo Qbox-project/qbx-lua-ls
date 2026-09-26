@@ -45,9 +45,6 @@ impl InspectionBudget {
     pub fn skip(&mut self, path: &Path) {
         self.omitted.insert(path.to_path_buf());
     }
-    pub fn omitted(&self) -> usize {
-        self.omitted.len()
-    }
     fn contains(&self, path: &Path) -> bool {
         std::fs::canonicalize(path).ok().is_some_and(|path| self.roots.iter().any(|root| path.starts_with(root)))
     }
@@ -548,8 +545,10 @@ pub fn diagnostic_snapshot(
         }
     }
     // Whole-workspace queries include the same unused locale-key checks as the Problems panel.
-    // If any file was skipped, do not infer unused keys from incomplete usage information.
-    if requested.is_none() && skipped == 0 && budget.omitted() == 0 && items.len() < MAX_RESULTS {
+    // If any Lua file was skipped, do not infer unused keys from incomplete usage information;
+    // supporting files that could not be read (a server.cfg above the roots, say) do not affect
+    // which keys the scripts use.
+    if requested.is_none() && skipped == 0 && items.len() < MAX_RESULTS {
         for (id, usage) in usages {
             let Some(resource) = ws.index.resource(id).filter(|entry| !entry.escrowed && !incomplete.contains(&id))
             else {
