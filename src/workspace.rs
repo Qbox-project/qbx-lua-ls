@@ -1,18 +1,19 @@
 use std::path::{Path, PathBuf};
 
 use lsp_types::Url;
-use qbx_fivem_data::{known_import, Side, STUBS};
+use qbx_fivem_data::{Side, STUBS};
+use qbx_lua_analysis::glob::{is_glob, manifest_glob_match};
 use qbx_lua_analysis::manifest::Manifest;
 use qbx_lua_analysis::project::{
-    find_manifest_dir, is_manifest_file, lua_files_under, manifest_path, read_source, relative_slash_path, side_of,
-    split_import, ResourceEnv, ResourceLocator, UnresolvedImport,
+    find_manifest_dir, is_manifest_file, lua_files_under, manifest_path, read_source, relative_slash_path,
+    resource_imports, side_of, split_import, ResourceEnv, ResourceLocator,
 };
 use qbx_lua_analysis::scope::resolve;
 use qbx_lua_analysis::Config;
 use qbx_lua_syntax::{parse, SmolStr};
 use rustc_hash::FxHashSet;
 
-use crate::index::{FileEntry, FileId, FileOrigin, Index, ResourceEntry, ResourceId};
+use crate::index::{normalize_path, FileEntry, FileId, FileOrigin, Index, ResourceEntry, ResourceId};
 use crate::indexer::index_file;
 
 const MAX_INDEXED_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -129,7 +130,9 @@ impl Workspace {
     fn index_dependencies(&mut self) -> usize {
         let mut wanted: Vec<(PathBuf, SmolStr)> = Vec::new();
         for resource in &self.index.resources {
-            let imports = resource.manifest.imports().filter_map(|s| split_import(&s.pattern)).map(|(name, _)| name);
+            let configured = self.lint_config.imports_for(&resource.manifest_path).into_iter().map(|(p, _)| p);
+            let patterns = resource.manifest.imports().map(|s| s.pattern.as_str()).chain(configured);
+            let imports = patterns.filter_map(split_import).map(|(name, _)| name);
             let dependencies = resource.manifest.dependencies.iter().map(|d| d.value.as_str());
             for name in imports.chain(dependencies) {
                 wanted.push((resource.root.clone(), SmolStr::new(name.trim_start_matches('/'))));
@@ -257,16 +260,27 @@ impl Workspace {
 
     pub fn link_imports(&mut self) {
         for id in 0..self.index.resources.len() {
-            let mut imports = Vec::new();
-            for script in self.index.resources[id].manifest.imports() {
-                let Some((resource, file)) = split_import(&script.pattern) else { continue };
-                let Some((_, target)) = self.index.resource_by_name(resource) else { continue };
-                if let Some(file_id) = self.index.file_id(&target.root.join(file)) {
-                    imports.push((file_id, script.side));
-                }
-            }
+            let entry = &self.index.resources[id];
+            let imports = resource_imports(&entry.manifest, &entry.manifest_path, &self.lint_config)
+                .into_iter()
+                .flat_map(|(pattern, side)| self.import_files(pattern).into_iter().map(move |file| (file, side)))
+                .collect();
             self.index.resources[id].imports = imports;
         }
+    }
+
+    /// The indexed files an `@resource/path` import names, where the path may be a manifest glob.
+    fn import_files(&self, pattern: &str) -> Vec<FileId> {
+        let Some((name, file)) = split_import(pattern) else { return Vec::new() };
+        let Some((_, target)) = self.index.resource_by_name(name) else { return Vec::new() };
+        if !is_glob(file) {
+            let id = self.index.file_id(&target.root.join(file));
+            return id.filter(|id| self.index.file(*id).is_some()).into_iter().collect();
+        }
+        // Open documents keep the path spelling the editor sent, so compare normalized paths.
+        let root = normalize_path(&target.root);
+        let matches = |path: &Path| manifest_glob_match(file, &relative_slash_path(&root, &normalize_path(path)));
+        target.files.iter().copied().filter(|id| self.index.file(*id).is_some_and(|f| matches(&f.path))).collect()
     }
 
     /// The lint environment of a resource, assembled from the per-file summaries in the index.
@@ -277,20 +291,9 @@ impl Workspace {
         for file in entry.files.iter().filter_map(|id| self.index.file(*id)) {
             env.add_summary(&file.index.summary, file.side);
         }
-        for script in entry.manifest.imports().filter(|s| s.pattern.ends_with(".lua")) {
-            let resolved = split_import(&script.pattern)
-                .and_then(|(name, file)| Some(self.index.resource_by_name(name)?.1.root.join(file)))
-                .and_then(|path| self.index.file(self.index.file_id(&path)?));
-            if let Some(file) = resolved {
-                env.add_summary(&file.index.summary, Some(script.side));
-            }
-            match known_import(&script.pattern) {
-                Some(known) => known.globals.iter().for_each(|g| env.add_global(&SmolStr::new(g), Some(script.side))),
-                None if resolved.is_none() => {
-                    env.unresolved_imports.push(UnresolvedImport { path: script.pattern.clone(), side: script.side })
-                }
-                None => {}
-            }
+        for (pattern, side) in resource_imports(&entry.manifest, &entry.manifest_path, &self.lint_config) {
+            let files = self.import_files(pattern).into_iter().filter_map(|id| self.index.file(id));
+            env.add_import(pattern, side, files.map(|file| &file.index.summary));
         }
         env
     }

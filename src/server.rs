@@ -531,7 +531,9 @@ impl Server {
     }
 
     fn watched_files_changed(&mut self, changes: Vec<FileEvent>) {
-        let mut manifests_changed = false;
+        // Manifests, the configured imports and new files that a glob import names change which
+        // files each resource imports.
+        let mut relink = false;
         let mut config_changed = false;
         for change in changes {
             let Some(path) = uri_to_path(&change.uri) else { continue };
@@ -543,21 +545,22 @@ impl Server {
                 // A manifest appearing or vanishing changes which resources count as installed.
                 qbx_lua_analysis::startup::clear_cache();
                 self.ws.reload_manifest(&path);
-                manifests_changed = true;
+                relink = true;
             } else if change.typ == FileChangeType::DELETED {
                 self.ws.index.remove_file(&path);
             } else if path.extension().is_some_and(|e| e == "lua") && !self.docs.contains_key(&change.uri) {
                 self.ws.index_path(&path, FileOrigin::Workspace, None);
+                relink |= change.typ == FileChangeType::CREATED;
             }
-        }
-        if manifests_changed {
-            self.ws.link_imports();
         }
         if config_changed {
             if let Some(root) = self.ws.roots.first() {
                 self.ws.lint_config = qbx_lua_analysis::Config::discover(root).ok().flatten().unwrap_or_default();
             }
             self.log_config_notes();
+        }
+        if relink || config_changed {
+            self.ws.link_imports();
         }
         self.workspace_stale = true;
         self.dirty.extend(self.docs.keys().cloned());

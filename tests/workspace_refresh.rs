@@ -177,6 +177,41 @@ fn scan_reloads_manifests_and_removes_deleted_and_excluded_state() {
 }
 
 #[test]
+fn configured_imports_define_globals_by_side_and_follow_the_config() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "qbxlint.toml",
+        "[[overrides]]\nfiles = ['[[]lib[]]/**']\n\
+         [overrides.imports]\nshared = ['@lib/shared/**.lua']\nclient = ['@lib/client/*.lua']\n",
+    );
+    fixture.write("lib/fxmanifest.lua", "files { 'shared/**.lua', 'client/*.lua' }");
+    fixture.write("lib/shared/deep/api.lua", "SharedApi = {}\n");
+    fixture.write("lib/client/api.lua", "function ClientApi() end\n");
+    fixture.write("[lib]/shop/fxmanifest.lua", "client_script 'client.lua'\nserver_script 'server.lua'\n");
+    fixture.write("other/fxmanifest.lua", "client_script 'client.lua'\n");
+    let undefined = |ws: &mut Workspace, relative: &str| -> Vec<String> {
+        let doc = fixture.document(ws, relative, "print(SharedApi, ClientApi)\n");
+        let found = diagnostics::diagnostics(ws, &doc, &[], &ws.crossrefs());
+        let undefined = found.into_iter().filter(|d| d.code == Some(NumberOrString::String("undefined-global".into())));
+        undefined.map(|d| d.message.split('\'').nth(1).unwrap().to_string()).collect()
+    };
+
+    let mut ws = fixture.workspace("");
+    assert_eq!(undefined(&mut ws, "[lib]/shop/client.lua"), Vec::<String>::new());
+    assert_eq!(undefined(&mut ws, "[lib]/shop/server.lua"), ["ClientApi"]);
+    assert_eq!(undefined(&mut ws, "other/client.lua"), ["SharedApi", "ClientApi"]);
+    let file = |ws: &Workspace, relative: &str| ws.index.file_id(&fixture.0.join(relative)).unwrap();
+    let client = file(&ws, "[lib]/shop/client.lua");
+    assert_eq!(ws.index.globals_named("ClientApi", client).len(), 1, "definitions reach the imported file");
+    assert_eq!(ws.index.globals_named("ClientApi", file(&ws, "[lib]/shop/server.lua")).len(), 0);
+
+    fixture.write("qbxlint.toml", "");
+    ws.scan();
+    assert_eq!(undefined(&mut ws, "[lib]/shop/client.lua"), ["SharedApi", "ClientApi"]);
+    assert_eq!(ws.index.globals_named("ClientApi", file(&ws, "[lib]/shop/client.lua")).len(), 0);
+}
+
+#[test]
 fn scan_rediscovers_missing_external_dependencies_and_prunes_removed_libraries() {
     let fixture = Fixture::new();
     fixture.write("demo/fxmanifest.lua", "shared_script '@external/init.lua'");
