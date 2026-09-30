@@ -298,6 +298,56 @@ impl Drop for Client {
 }
 
 #[test]
+fn new_glob_imports_are_linked_for_closed_open_and_unsaved_documents() {
+    for (open, saved, watched) in [(false, true, true), (true, true, true), (true, false, false)] {
+        let fixture = Fixture::new();
+        fixture.write("qbxlint.toml", "[imports]\nclient = ['@lib/*.lua']\n");
+        fixture.write("lib/fxmanifest.lua", "files { '*.lua' }\n");
+        fixture.write("lib/old.lua", "OldApi = true\n");
+        fixture.write("shop/fxmanifest.lua", "client_script 'client.lua'\n");
+        fixture.write("shop/client.lua", "print(NewApi)\n");
+        let mut client = Client::start(&fixture.0);
+        // Finish the initial scan before introducing the imported file.
+        client.request("qbx/status", Value::Null);
+        let caller = path_to_uri(&fixture.0.join("shop/client.lua"));
+        let imported = path_to_uri(&fixture.0.join("lib/new.lua"));
+        client.open(&caller, "print(NewApi)\n");
+        if saved {
+            fixture.write("lib/new.lua", "NewApi = true\n");
+        }
+        if open {
+            client.open(&imported, "NewApi = true\n");
+        }
+        if watched {
+            client.notify("workspace/didChangeWatchedFiles", json!({"changes": [{"uri": imported, "type": 1}]}));
+        }
+        let definitions = client.request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": caller}, "position": {"line": 0, "character": 8}
+            }),
+        );
+        let definitions = definitions.as_array().expect("new glob import must have a definition");
+        assert!(definitions.iter().any(|definition| definition["uri"] == imported.as_str()), "{definitions:?}");
+    }
+}
+
+#[test]
+fn configured_exact_imports_respect_exclusions() {
+    let fixture = Fixture::new();
+    fixture.write("qbxlint.toml", "exclude = ['lib/api.lua']\n[imports]\nclient = ['@lib/api.lua']\n");
+    fixture.write("lib/fxmanifest.lua", "files { 'api.lua' }\n");
+    fixture.write("lib/api.lua", "ExcludedApi = true\n");
+    fixture.write("shop/fxmanifest.lua", "client_script 'client.lua'\n");
+    fixture.write("shop/client.lua", "print(ExcludedApi)\n");
+    let ws = fixture.workspace("");
+    let caller = ws.index.file_id(&fixture.0.join("shop/client.lua")).unwrap();
+    let resource = ws.index.file(caller).unwrap().resource.unwrap();
+    assert!(!ws.resource_env(resource).defines("ExcludedApi", Some(Side::Client)));
+    assert!(ws.index.globals_named("ExcludedApi", caller).is_empty());
+}
+
+#[test]
 fn manual_reindex_restores_unsaved_documents_and_their_new_file_ids() {
     let fixture = Fixture::new();
     fixture.write("demo/fxmanifest.lua", "client_script '*.lua'");

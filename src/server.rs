@@ -304,16 +304,21 @@ impl Server {
     /// Open documents are reparsed on every edit but only reindexed once something needs the index.
     fn flush_index(&mut self) {
         self.diagnostics_pending |= !self.dirty.is_empty();
+        let mut relink = false;
         for uri in std::mem::take(&mut self.dirty) {
             if let Some(doc) = self.docs.get_mut(&uri) {
                 // A full scan reallocates file IDs, including the reserved slots for manifests.
                 doc.file = self.ws.index.allocate(&doc.path);
                 let is_source = !qbx_lua_analysis::project::is_not_source(doc.text.as_bytes());
                 if !doc.is_manifest() && is_source && !self.ws.lint_config.is_excluded(&doc.path) {
+                    relink |= self.ws.index.file(doc.file).is_none();
                     doc.file =
                         self.ws.index_parsed(&doc.path, FileOrigin::Workspace, &doc.text, &doc.chunk, &doc.resolution);
                 }
             }
+        }
+        if relink {
+            self.ws.link_imports();
         }
     }
 
@@ -548,8 +553,10 @@ impl Server {
                 relink = true;
             } else if change.typ == FileChangeType::DELETED {
                 self.ws.index.remove_file(&path);
-            } else if path.extension().is_some_and(|e| e == "lua") && !self.docs.contains_key(&change.uri) {
-                self.ws.index_path(&path, FileOrigin::Workspace, None);
+            } else if path.extension().is_some_and(|e| e == "lua") {
+                if !self.docs.contains_key(&change.uri) {
+                    self.ws.index_path(&path, FileOrigin::Workspace, None);
+                }
                 relink |= change.typ == FileChangeType::CREATED;
             }
         }
