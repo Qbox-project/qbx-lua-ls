@@ -1,5 +1,15 @@
 # qbx-lua-ls
 
+> Development has moved to the [combined Qbox Lua tooling workspace](https://github.com/Qbox-project/qbx-lint).
+> The language server lives in [`crates/qbx_lua_ls`](https://github.com/Qbox-project/qbx-lint/tree/main/crates/qbx_lua_ls),
+> alongside the linter, formatter and shared analysis crates. Open new issues and pull requests there.
+> Download `qbx-lua-ls` from the [shared releases](https://github.com/Qbox-project/qbx-lint/releases).
+>
+> This repository is retained for its original commit history and releases through `v1.0.4`.
+> All commits from its migration source tip were imported with their original hashes and authors;
+> historical tags are also preserved as `lua-ls/v1.0.x` in the combined repository.
+> See the [migration notes](https://github.com/Qbox-project/qbx-lint/blob/main/docs/repository-migration.md).
+
 A language server for FiveM Lua. It reads `fxmanifest.lua` to resolve resource imports and
 client/server scripts, uses LuaCATS annotations for editor help, and provides diagnostics from
 [qbx-lint](https://github.com/Qbox-project/qbx-lint).
